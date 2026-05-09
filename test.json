@@ -1,0 +1,60 @@
+{
+    "method_id": "email-test-e18f8aae-ee73-4740-a8f5-e5572bf22a5e",
+    "request_id": "request-id-test-d1fb6860-ed27-45ce-85e7-e8da7b32dc06",
+    "reset_sessions": false,
+    "session": {
+        "attributes": {
+            "ip_address": "",
+            "user_agent": ""
+        },
+        "authentication_factors": [
+            {
+                "created_at": "2024-10-25T07:37:40Z",
+                "delivery_method": "email",
+                "email_factor": {
+                    "email_address": "gatshabz221097@gmail.com",
+                    "email_id": "email-test-e18f8aae-ee73-4740-a8f5-e5572bf22a5e"
+                },
+                "last_authenticated_at": "2024-10-25T07:37:40Z",
+                "type": "otp",
+                "updated_at": "2024-10-25T07:37:40Z"
+            }
+        ],
+        "custom_claims": {},
+        "expires_at": "2024-10-25T08:37:40Z",
+        "last_accessed_at": "2024-10-25T07:37:40Z",
+        "session_id": "session-test-302e4272-c259-48b9-8df5-cc3575cd9819",
+        "started_at": "2024-10-25T07:37:40Z",
+        "user_id": "user-test-d1c6a76e-7197-40fe-a347-f93b4e78f4c9"
+    },
+    "session_jwt": "eyJhbGciOiJSUzI1NiIsImtpZCI6Imp3ay10ZXN0LWNmMzZhYTQ2LTYxOTEtNDk3Ni04OTE5LTg2MTZhNTYyYTZmOCIsInR5cCI6IkpXVCJ9.eyJhdWQiOlsicHJvamVjdC10ZXN0LTFiMWJkNzVkLTkwZDQtNGM5NC05MWIyLTQ0ZjAzZjRhMWQyOSJdLCJleHAiOjE3Mjk4NDIxNjAsImh0dHBzOi8vc3R5dGNoLmNvbS9zZXNzaW9uIjp7ImlkIjoic2Vzc2lvbi10ZXN0LTMwMmU0MjcyLWMyNTktNDhiOS04ZGY1LWNjMzU3NWNkOTgxOSIsInN0YXJ0ZWRfYXQiOiIyMDI0LTEwLTI1VDA3OjM3OjQwWiIsImxhc3RfYWNjZXNzZWRfYXQiOiIyMDI0LTEwLTI1VDA3OjM3OjQwWiIsImV4cGlyZXNfYXQiOiIyMDI0LTEwLTI1VDA4OjM3OjQwWiIsImF0dHJpYnV0ZXMiOnsidXNlcl9hZ2VudCI6IiIsImlwX2FkZHJlc3MiOiIifSwiYXV0aGVudGljYXRpb25fZmFjdG9ycyI6W3sidHlwZSI6Im90cCIsImRlbGl2ZXJ5X21ldGhvZCI6ImVtYWlsIiwibGFzdF9hdXRoZW50aWNhdGVkX2F0IjoiMjAyNC0xMC0yNVQwNzozNzo0MFoiLCJlbWFpbF9mYWN0b3IiOnsiZW1haWxfaWQiOiJlbWFpbC10ZXN0LWUxOGY4YWFlLWVlNzMtNDc0MC1hOGY1LWU1NTcyYmYyMmE1ZSIsImVtYWlsX2FkZHJlc3MiOiJnYXRzaGFiejIyMTA5N0BnbWFpbC5jb20ifX1dfSwiaWF0IjoxNzI5ODQxODYwLCJpc3MiOiJzdHl0Y2guY29tL3Byb2plY3QtdGVzdC0xYjFiZDc1ZC05MGQ0LTRjOTQtOTFiMi00NGYwM2Y0YTFkMjkiLCJuYmYiOjE3Mjk4NDE4NjAsInN1YiI6InVzZXItdGVzdC1kMWM2YTc2ZS03MTk3LTQwZmUtYTM0Ny1mOTNiNGU3OGY0YzkifQ.gBhMqeR7V4KVsGbQivLPnatt9rT8NVzYWcZQNCKWRVJM38JlfYFcCU-IrQsvHsjN2NJ6JtXZ3Xkn9DhhDJswET44v_RJY6W3KGc7XEny9WxuvB9g82sGssz7Ug0WxjMlUlq-EiM3HhY7XKduA7NvkHTRJZWxIAYrWquVJ9Bm3rYG2EqCqGpi5o6VxlIwUOdswHK6KMNRS2SS2oau_CANWxhItHcDCuUsqOiCohjoG0BmwChUQwwXe1cVIIblgDREwgAwrbVhz-KNF2XlrSCwUYlWeemKR8BnKkaU6g1FAMOYWYiNju1VQFN9g81cD_PI5rSCujipGPTqEVjJu8DsWw",
+    "session_token": "8TXNydTs5rqQjRpc0KlGv-JyNrEjAjddoCrdGBtjWY5t",
+    "status_code": 200,
+    "user": {
+        "biometric_registrations": [],
+        "created_at": "2024-08-12T11:05:30Z",
+        "crypto_wallets": [],
+        "emails": [
+            {
+                "email": "gatshabz221097@gmail.com",
+                "email_id": "email-test-e18f8aae-ee73-4740-a8f5-e5572bf22a5e",
+                "verified": true
+            }
+        ],
+        "name": {
+            "first_name": "",
+            "last_name": "",
+            "middle_name": ""
+        },
+        "password": null,
+        "phone_numbers": [],
+        "providers": [],
+        "status": "active",
+        "totps": [],
+        "trusted_metadata": {},
+        "untrusted_metadata": {},
+        "user_id": "user-test-d1c6a76e-7197-40fe-a347-f93b4e78f4c9",
+        "webauthn_registrations": []
+    },
+    "user_id": "user-test-d1c6a76e-7197-40fe-a347-f93b4e78f4c9"
+}

@@ -1,0 +1,36 @@
+import { DataSource } from 'typeorm';
+import fs from 'fs';
+import * as dotenv from 'dotenv';
+import pg from 'pg';
+
+dotenv.config();
+
+// Fix for PostgreSQL timestamp parsing - treat timestamps as UTC
+// OID 1114 = timestamp without time zone
+// OID 1184 = timestamp with time zone
+pg.types.setTypeParser(1114, (stringValue: string) => new Date(stringValue + 'Z'));
+pg.types.setTypeParser(1184, (stringValue: string) => new Date(stringValue));
+
+export const AppDataSource = new DataSource({
+  type: 'postgres',
+  host: process.env.DB_HOST,
+  port: 5432,
+  username: process.env.DB_USER,
+  password: process.env.DB_PASSWORD,
+  database: process.env.DB_NAME,
+  entities: [
+    'src/services/user-service/entity/*.ts',
+    'src/services/auth-service/entity/*.ts',
+    'src/services/ai-service/entity/*.ts',
+    'src/services/subscription-service/entity/*.ts',
+    'src/services/token-service/entity/*.ts',
+  ],
+  synchronize: true,
+  ssl: {
+    // eslint-disable-next-line
+    // @ts-ignore
+    require: true,
+    rejectUnauthorized: true, // Set to true in production with a valid certificate
+    ca: fs.readFileSync('certificates/eu-north-1-bundle.pem').toString(),
+  },
+});
