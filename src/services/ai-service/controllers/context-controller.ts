@@ -1,12 +1,10 @@
 import express, { Request, Response } from 'express';
 import dotenv from 'dotenv';
 import { isAuthenticated, isAuthenticatedNativeOrMcp } from '../../user-service/middlewares/auth-middleware';
-import { chargeMcpCall } from '../../subscription-service/middlewares/charge-mcp-middleware';
 import axios from 'axios';
 import { AppDataSource } from '../../../data-source';
 import { UserContext, ContextStatus } from '../entity/user-context';
 import { UserAiProfile } from '../entity/user-ai-profile';
-import { IpCredit } from '../entity/ip-credit';
 import Logger from '../../../lib/logger';
 import multer from 'multer';
 import FormData from 'form-data';
@@ -18,19 +16,24 @@ import { User } from '../../user-service/entity/user';
 import { resolveProfileAccess, canEditContext, hasMinRole } from '../utils/permission';
 import { logActivity } from '../utils/activity';
 import { notifyShareMembers } from '../utils/notify';
-import {
-  checkContextSizeLimitMiddleware,
-  checkSubscriptionAndCreditLimit,
-  checkModelAccess,
-} from '../../subscription-service/middlewares/subscription-middleware';
-import { deductCredits, estimateBytesFromCharCount } from '../../subscription-service/utils';
-import { getModelConfig } from '../../subscription-service/model-tiers';
+import { hashContent } from '../../blockchain-service/utils/hash-utils';
+import { recomputeAndStore as recomputeBucketHash } from '../utils/bucket-hash';
 
 dotenv.config();
 export const contextRouter = express.Router();
 const userContextRepository = AppDataSource.getRepository(UserContext);
 const userAiProfileRepository = AppDataSource.getRepository(UserAiProfile);
-const ipCreditRepository = AppDataSource.getRepository(IpCredit);
+
+// Fire-and-forget wrapper: a hash recompute failure must never break the
+// user-facing add/delete. The bucketHash is rebuildable from user_context
+// at any time, so logging is sufficient. Phase 8 (`assertEditable`) is what
+// actually enforces immutability — the throw inside recomputeAndStore is
+// defense-in-depth.
+function refreshBucketHash(profileId: string): void {
+  recomputeBucketHash(profileId).catch((err) => {
+    Logger.warn(`[bucket-hash] refresh failed for profile ${profileId}: ${err?.message || err}`);
+  });
+}
 
 // Helper function to validate chatHistory structure
 const validateChatHistory = (chatHistory: any): { valid: boolean; error?: string } => {
@@ -86,34 +89,13 @@ const getClientIP = (req: Request): string => {
   return '';
 };
 
-// Helper function to manage IP credits
-const getOrCreateIpCredit = async (ipAddress: string): Promise<IpCredit> => {
-  let ipCredit = await ipCreditRepository.findOne({ where: { ipAddress } });
-
-  if (!ipCredit) {
-    ipCredit = ipCreditRepository.create({
-      ipAddress,
-      credits: 100, // Default credits for new IP
-      tokensUsed: 0,
-    });
-    await ipCreditRepository.save(ipCredit);
-  }
-
-  return ipCredit;
-};
-
 // this is for adding raw context to the profile
-contextRouter.post(
-  '/add-raw-context',
-  isAuthenticatedNativeOrMcp('mcp:tools'),
-  checkSubscriptionAndCreditLimit,
-  checkContextSizeLimitMiddleware,
-  async (req: Request, res: Response) => {
-    // #swagger.tags = ['AI-Context']
-    /* #swagger.security = [{
+contextRouter.post('/add-raw-context', isAuthenticatedNativeOrMcp('mcp:tools'), async (req: Request, res: Response) => {
+  // #swagger.tags = ['AI-Context']
+  /* #swagger.security = [{
             "bearerAuth": []
     }] */
-    /* #swagger.requestBody = {
+  /* #swagger.requestBody = {
             required: true,
             content: {
               "application/json": {
@@ -128,7 +110,7 @@ contextRouter.post(
               }
             }
     } */
-    /* #swagger.responses[200] = {
+  /* #swagger.responses[200] = {
             description: 'Context added successfully',
             schema: {
               type: 'object',
@@ -142,166 +124,162 @@ contextRouter.post(
               }
             }
     } */
-    try {
-      const userId = req?.user?.id;
-      const { profileId, context, sourcePlatform, sourceUrl, title: customTitle } = req.body;
-      Logger.info(`[ADD_RAW_CONTEXT] user=${userId}, profile=${profileId || 'new'}`);
+  try {
+    const userId = req?.user?.id;
+    const authAddress = req?.user?.authAddress;
+    const { profileId, context, sourcePlatform, sourceUrl, title: customTitle } = req.body;
+    Logger.info(`[ADD_RAW_CONTEXT] user=${userId}, profile=${profileId || 'new'}`);
 
-      // Validate context input
-      if (!context) {
-        return res.status(400).json({ error: 'Context is required' });
-      }
-
-      if (typeof context !== 'string') {
-        return res.status(400).json({ error: 'Context must be a string' });
-      }
-
-      if (context.trim().length === 0) {
-        return res.status(400).json({ error: 'Context cannot be empty' });
-      }
-
-      // if (context.length > 1000000) {
-      //   return res.status(400).json({ error: 'Context is too long. Maximum length is 1,000,000 characters.' });
-      // }
-
-      let profile;
-      let effectiveOwnerId = userId; // who owns the data namespace
-      if (!profileId) {
-        // create a new profile if no profile id is provided
-        profile = await createProfile(userId || '', 'untitled', '');
-        Logger.info('called create profile', profile?.id);
-      } else {
-        // Validate profileId is a valid UUID
-        if (!isValidUUID(profileId)) {
-          return res.status(400).json({ error: 'Invalid Profile ID format. Expected a valid UUID.' });
-        }
-
-        // Permission check: must have editor+ access
-        const access = await resolveProfileAccess(userId as string, profileId as string);
-        if (!access.hasAccess || !hasMinRole(access, 'editor')) {
-          return res.status(404).json({ error: 'Profile not found or insufficient permissions' });
-        }
-
-        effectiveOwnerId = access.ownerId || userId;
-
-        profile = await userAiProfileRepository.findOne({
-          where: { id: profileId },
-        });
-        if (!profile) {
-          return res.status(404).json({ error: 'Profile not found' });
-        }
-      }
-
-      // Calculate content size in bytes from raw text
-      const contentSize = context ? Buffer.byteLength(context, 'utf8') : 0;
-
-      // Step 1: Create context with IN_PROGRESS status BEFORE calling AI service
-      const contextId = uuidv4();
-      const userContext = userContextRepository.create({
-        userId: effectiveOwnerId, // store under owner's namespace
-        contextId,
-        title: 'untitled',
-        description: '',
-        profileId: profile?.id,
-        status: ContextStatus.IN_PROGRESS,
-        // Metadata for source identification
-        sourceType: 'text',
-        sourcePlatform: sourcePlatform || null,
-        sourceUrl: sourceUrl || null,
-        contentSize,
-        addedBy: userId, // track who actually added it
-      });
-      await userContextRepository.save(userContext);
-
-      // Step 2: Call the Python AI service endpoint
-      const response = await axios.post(
-        `${process.env.AI_SERVICE_URL}/rag/add-context`,
-        {
-          userId: effectiveOwnerId,
-          profileId: profile?.id,
-          context,
-          contextId,
-        },
-        {
-          headers: {
-            'Content-Type': 'application/json',
-            'X-API-Key': process.env.AI_SERVICE_API_KEY as string,
-          },
-        },
-      );
-
-      if (response.status !== 200) {
-        Logger.error('Failed to add context to AI service');
-        // Update status to ERROR on failure
-        userContext.status = ContextStatus.ERROR;
-        userContext.errorMessage = 'Failed to add context to AI service';
-        await userContextRepository.save(userContext);
-        return res.status(500).json({ error: 'Failed to add context to AI service' });
-      }
-
-      // Step 3: Update context with response data and COMPLETED status
-      userContext.title = customTitle || response?.data?.extractedTitle || 'untitled';
-      userContext.description = response?.data?.extractedDescription || '';
-      userContext.vectorIds = response?.data?.vectorIds || [];
-      userContext.status = ContextStatus.COMPLETED;
-      await userContextRepository.save(userContext);
-
-      if (profile.profileName === 'untitled' || profile.profileName === '') {
-        profile.profileName = customTitle || response?.data?.extractedTitle || 'untitled';
-        await userAiProfileRepository.save(profile);
-      }
-
-      // Fire-and-forget: activity log + notifications
-      logActivity(profile.id, userId as string, 'context_added', {
-        targetType: 'context',
-        targetId: contextId,
-        metadata: { title: userContext.title, sourceType: 'text' },
-      });
-      notifyShareMembers(
-        profile.id,
-        userId as string,
-        'context_added',
-        `A new context '${userContext.title}' was added to '${profile.profileName}'`,
-        undefined,
-        {
-          profileId: profile.id,
-          contextId,
-          profileName: profile.profileName,
-        },
-      );
-
-      // Deduct credits
-      if (response?.data?.tokens_used?.total_tokens) {
-        const result = await deductCredits(
-          userId as string,
-          response.data?.tokens_used?.total_tokens || 1,
-          response.data?.tokens_used?.model,
-        );
-        if (!result.success) Logger.error('[ADD_RAW_CONTEXT] Failed to deduct credits for user:', userId);
-      }
-
-      // Return the AI service response along with the saved context info
-      res.status(200).json({
-        contextId: userContext.contextId,
-        userId: userContext.userId,
-        title: userContext.title,
-        description: userContext.description,
-        profileId: userContext.profileId,
-        createdAt: userContext.createdAt,
-      });
-    } catch (error) {
-      Logger.error('Error in RAG controller:', error);
-      res.status(500).send('Internal Server Error');
+    // Validate context input
+    if (!context) {
+      return res.status(400).json({ error: 'Context is required' });
     }
-  },
-);
+
+    if (typeof context !== 'string') {
+      return res.status(400).json({ error: 'Context must be a string' });
+    }
+
+    if (context.trim().length === 0) {
+      return res.status(400).json({ error: 'Context cannot be empty' });
+    }
+
+    // if (context.length > 1000000) {
+    //   return res.status(400).json({ error: 'Context is too long. Maximum length is 1,000,000 characters.' });
+    // }
+
+    let profile;
+    let effectiveOwnerId = userId; // who owns the data namespace
+    if (!profileId) {
+      // create a new profile if no profile id is provided
+      profile = await createProfile(userId || '', 'untitled', '');
+      Logger.info('called create profile', profile?.id);
+    } else {
+      // Validate profileId is a valid UUID
+      if (!isValidUUID(profileId)) {
+        return res.status(400).json({ error: 'Invalid Profile ID format. Expected a valid UUID.' });
+      }
+
+      // Permission check: must have editor+ access
+      const access = await resolveProfileAccess(authAddress as string, userId as string, profileId as string);
+      if (!access.hasAccess || !hasMinRole(access, 'editor')) {
+        return res.status(404).json({ error: 'Profile not found or insufficient permissions' });
+      }
+      if (access.isImmutable) {
+        return res.status(403).json({
+          error: 'bucket_immutable',
+          message: 'This bucket has been minted and is read-only. Add contexts to a different bucket.',
+        });
+      }
+
+      effectiveOwnerId = access.ownerId || userId;
+
+      profile = await userAiProfileRepository.findOne({
+        where: { id: profileId },
+      });
+      if (!profile) {
+        return res.status(404).json({ error: 'Profile not found' });
+      }
+    }
+
+    // Calculate content size in bytes from raw text
+    const contentSize = context ? Buffer.byteLength(context, 'utf8') : 0;
+
+    // Step 1: Create context with IN_PROGRESS status BEFORE calling AI service
+    const contextId = uuidv4();
+    const userContext = userContextRepository.create({
+      userId: effectiveOwnerId, // store under owner's namespace
+      contextId,
+      title: 'untitled',
+      description: '',
+      profileId: profile?.id,
+      status: ContextStatus.IN_PROGRESS,
+      // Metadata for source identification
+      sourceType: 'text',
+      sourcePlatform: sourcePlatform || null,
+      sourceUrl: sourceUrl || null,
+      contentSize,
+      addedBy: userId, // track who actually added it
+      contentHash: hashContent(context), // SHA-256 for on-chain provenance
+    });
+    await userContextRepository.save(userContext);
+    refreshBucketHash(profile.id);
+
+    // Step 2: Call the Python AI service endpoint
+    const response = await axios.post(
+      `${process.env.AI_SERVICE_URL}/rag/add-context`,
+      {
+        userId: effectiveOwnerId,
+        profileId: profile?.id,
+        context,
+        contextId,
+      },
+      {
+        headers: {
+          'Content-Type': 'application/json',
+          'X-API-Key': process.env.AI_SERVICE_API_KEY as string,
+        },
+      },
+    );
+
+    if (response.status !== 200) {
+      Logger.error('Failed to add context to AI service');
+      // Update status to ERROR on failure
+      userContext.status = ContextStatus.ERROR;
+      userContext.errorMessage = 'Failed to add context to AI service';
+      await userContextRepository.save(userContext);
+      return res.status(500).json({ error: 'Failed to add context to AI service' });
+    }
+
+    // Step 3: Update context with response data and COMPLETED status
+    userContext.title = customTitle || response?.data?.extractedTitle || 'untitled';
+    userContext.description = response?.data?.extractedDescription || '';
+    userContext.vectorIds = response?.data?.vectorIds || [];
+    userContext.status = ContextStatus.COMPLETED;
+    await userContextRepository.save(userContext);
+
+    if (profile.profileName === 'untitled' || profile.profileName === '') {
+      profile.profileName = customTitle || response?.data?.extractedTitle || 'untitled';
+      await userAiProfileRepository.save(profile);
+    }
+
+    // Fire-and-forget: activity log + notifications
+    logActivity(profile.id, userId as string, 'context_added', {
+      targetType: 'context',
+      targetId: contextId,
+      metadata: { title: userContext.title, sourceType: 'text' },
+    });
+    notifyShareMembers(
+      profile.id,
+      userId as string,
+      'context_added',
+      `A new context '${userContext.title}' was added to '${profile.profileName}'`,
+      undefined,
+      {
+        profileId: profile.id,
+        contextId,
+        profileName: profile.profileName,
+      },
+    );
+
+    // Return the AI service response along with the saved context info
+    res.status(200).json({
+      contextId: userContext.contextId,
+      userId: userContext.userId,
+      title: userContext.title,
+      description: userContext.description,
+      profileId: userContext.profileId,
+      createdAt: userContext.createdAt,
+    });
+  } catch (error) {
+    Logger.error('Error in RAG controller:', error);
+    res.status(500).send('Internal Server Error');
+  }
+});
 
 // this is for adding chat context to the profile, specifically for extension
 contextRouter.post(
   '/add-chat-context',
   isAuthenticatedNativeOrMcp('mcp:tools'),
-  checkSubscriptionAndCreditLimit,
-  checkContextSizeLimitMiddleware,
   async (req: Request, res: Response) => {
     // #swagger.tags = ['AI-Context']
     /* #swagger.security = [{
@@ -348,6 +326,7 @@ contextRouter.post(
     } */
     try {
       const userId = req?.user?.id;
+      const authAddress = req?.user?.authAddress;
       const { profileId, chatHistory, platform, sourceUrl, title: customTitle } = req.body;
       Logger.info(
         `[ADD_CHAT_CONTEXT] user=${userId}, profile=${profileId || 'new'}, messages=${chatHistory?.length || 0}`,
@@ -384,7 +363,7 @@ contextRouter.post(
         }
 
         // Permission check: must have editor+ access
-        const access = await resolveProfileAccess(userId as string, profileId as string);
+        const access = await resolveProfileAccess(authAddress as string, userId as string, profileId as string);
         if (!access.hasAccess || !hasMinRole(access, 'editor')) {
           return res.status(404).json({ error: 'Profile not found or insufficient permissions' });
         }
@@ -414,8 +393,10 @@ contextRouter.post(
         sourceUrl: sourceUrl || null,
         contentSize,
         addedBy: userId, // track who actually added it
+        contentHash: hashContent(JSON.stringify(chatHistory)), // SHA-256 for on-chain provenance
       });
       await userContextRepository.save(userContext);
+      refreshBucketHash(profile.id);
 
       // Step 2: Call the Python AI service endpoint
       const response = await axios.post(
@@ -474,16 +455,6 @@ contextRouter.post(
         },
       );
 
-      // Deduct credits
-      if (response?.data?.tokens_used?.total_tokens) {
-        const result = await deductCredits(
-          userId as string,
-          response.data?.tokens_used?.total_tokens || 1,
-          response.data?.tokens_used?.model,
-        );
-        if (!result.success) Logger.error('[ADD_CHAT_CONTEXT] Failed to deduct credits for user:', userId);
-      }
-
       // Return the AI service response along with the saved context info
       res.status(200).json({
         contextId: userContext.contextId,
@@ -500,586 +471,90 @@ contextRouter.post(
   },
 );
 
-// Query contexts
-// TODO: Public access feature - currently disabled (see rejection in unauthenticated block below)
-contextRouter.post(
-  '/query',
-  isAuthenticated,
-  checkSubscriptionAndCreditLimit,
-  checkModelAccess,
-  async (req: Request, res: Response) => {
-    // #swagger.tags = ['AI-Context']
-    /* #swagger.security = [{
+contextRouter.get('/', isAuthenticatedNativeOrMcp('mcp:tools'), async (req: Request, res: Response) => {
+  // #swagger.tags = ['AI-Context']
+  /* #swagger.security = [{
             "bearerAuth": []
     }] */
-    /* #swagger.parameters['body'] = {
-            in: 'body',
-            description: 'Query parameters',
-            required: true,
-            schema: {
-              type: 'object',
-              properties: {
-                query: {
-                  type: 'string',
-                  description: "User's query or question",
-                  example: 'What is the capital of France?'
-                },
-                profileId: {
-                  type: 'string',
-                  description: 'AI profile ID to query against (optional - empty string for no profile)',
-                  example: '123e4567-e89b-12d3-a456-426614174000'
-                },
-                model: {
-                  type: 'string',
-                  description: 'LLM model to use. Defaults to gemini-2.5-flash',
-                  default: 'gemini-2.5-flash',
-                  example: 'gemini-2.5-flash',
-                  enum: ['gemini-2.5-flash', 'gemini-1.5-flash', 'gemini-1.5-pro', 'claude-sonnet-4', 'claude-sonnet-3.7', 'claude-sonnet-3.5', 'claude-haiku-4.5', 'llama-3.3-70b', 'llama-3.2-3b', 'llama-3.2-1b', 'llama-3.1-70b', 'llama-3.1-8b', 'mistral-large', 'mistral-large-3', 'mistral-small', 'pixtral-large', 'nova-pro', 'nova-lite', 'nova-micro', 'gpt-oss-120b', 'deepseek-r1-distill-llama', 'writer-palmyra-x4', 'writer-palmyra-fin']
-                },
-                k: {
-                  type: 'number',
-                  description: 'Number of context chunks to retrieve',
-                  default: 5,
-                  example: 5
-                },
-                chatHistory: {
-                  type: 'array',
-                  description: 'Previous chat messages for context',
-                  default: [],
-                  items: {
-                    type: 'object',
-                    properties: {
-                      role: {
-                        type: 'string',
-                        enum: ['user', 'assistant'],
-                        example: 'user'
-                      },
-                      content: {
-                        type: 'string',
-                        example: 'Hello'
-                      }
-                    }
-                  }
-                },
-                enableWebSearch: {
-                  type: 'boolean',
-                  description: 'Enable web search to augment answers',
-                  example: false
-                },
-                enableUrlExtraction: {
-                  type: 'boolean',
-                  description: 'Enable URL extraction from query',
-                  example: false
-                }
-              },
-              required: ['query']
-            }
-    } */
-    /* #swagger.responses[200] = {
-            description: 'Query executed successfully',
-            schema: {
-              type: 'object',
-              properties: {
-                answer: { type: 'string', description: 'AI-generated answer' },
-                sources: {
-                  type: 'array',
-                  items: { type: 'object' },
-                  description: 'Source contexts used for the answer'
-                },
-                tokens_used: {
-                  type: 'object',
-                  properties: {
-                    input_tokens: { type: 'number' },
-                    output_tokens: { type: 'number' },
-                    total_tokens: { type: 'number' }
-                  }
-                },
-                credits: {
-                  type: 'object',
-                  properties: {
-                    remaining: { type: 'number' },
-                    used: { type: 'number' },
-                    totalTokensUsed: { type: 'number' }
-                  },
-                  description: 'Credit info (only for unauthenticated users)'
-                }
+  try {
+    const userId = req?.user?.id;
+    const authAddress = req?.user?.authAddress;
+    const { profileId } = req.query;
+
+    if (!userId) {
+      return res.status(401).json({ error: 'User not authenticated' });
+    }
+
+    // Validate profileId if provided
+    if (profileId && !isValidUUID(profileId as string)) {
+      return res.status(400).json({ error: 'Invalid Profile ID format. Expected a valid UUID.' });
+    }
+
+    if (profileId) {
+      // Permission check: must have viewer+ access to the bucket
+      const access = await resolveProfileAccess(authAddress as string, userId as string, profileId as string);
+      if (!access.hasAccess) {
+        return res.status(404).json({ error: 'Profile not found' });
+      }
+
+      // Get all contexts for this profile with addedBy user info
+      // COALESCE: if addedBy is NULL (pre-sharing context), fall back to owner
+      const rawContexts = await userContextRepository
+        .createQueryBuilder('c')
+        .leftJoin(User, 'u', 'u.id = COALESCE(c.addedBy, :ownerId)', { ownerId: access.ownerId })
+        .select(['c.*', 'u.name AS "addedByName"', 'u.email AS "addedByEmail"', 'u.authAddress AS "addedByWallet"'])
+        .where('c.profileId = :profileId', { profileId })
+        .orderBy('c.createdAt', 'ASC')
+        .getRawMany();
+
+      // Add canEdit flag and addedByUser per context
+      const contextsWithPermissions = rawContexts.map((ctx) => ({
+        contextId: ctx.contextId,
+        userId: ctx.userId,
+        profileId: ctx.profileId,
+        title: ctx.title,
+        description: ctx.description,
+        status: ctx.status,
+        errorMessage: ctx.errorMessage,
+        vectorIds: ctx.vectorIds,
+        createdAt: ctx.createdAt,
+        originalFileName: ctx.originalFileName,
+        sourceType: ctx.sourceType,
+        sourcePlatform: ctx.sourcePlatform,
+        sourceUrl: ctx.sourceUrl,
+        contentSize: ctx.contentSize,
+        contentHash: ctx.contentHash || null,
+        registeredOnChain: ctx.registeredOnChain || false,
+        registryTxHash: ctx.registryTxHash || null,
+        addedBy:
+          ctx.addedByName || ctx.addedByEmail || ctx.addedByWallet
+            ? {
+                id: ctx.addedBy || access.ownerId,
+                name: ctx.addedByName || null,
+                email: ctx.addedByEmail || null,
+                wallet: ctx.addedByWallet || null,
+                isOwner: !ctx.addedBy || ctx.addedBy === access.ownerId,
               }
-            }
-    } */
-    /* #swagger.responses[400] = {
-            description: 'Bad request - Missing required fields (query or profileId)'
-    } */
-    /* #swagger.responses[403] = {
-            description: 'Forbidden - Profile not accessible or not published (when profileId provided)'
-    } */
-    /* #swagger.responses[404] = {
-            description: 'Profile not found (when profileId provided)'
-    } */
-    /* #swagger.responses[429] = {
-            description: 'Insufficient credits (unauthenticated users only)'
-    } */
-    try {
-      const userId = req?.user?.id;
-      const {
-        query,
-        profileId,
-        k = 5,
-        chatHistory = [],
-        enableWebSearch,
-        enableUrlExtraction,
-        model = 'gemini-2.5-flash',
-      } = req.body;
-      const isAuthenticated = !!userId;
-      // TODO: Uncomment when enabling public access
-      // let ipCredit: IpCredit | null = null;
+            : // addedBy set but user deleted, or no user record found
+              { id: ctx.addedBy || access.ownerId, name: null, isOwner: !ctx.addedBy },
+        canEdit: canEditContext(access, ctx as UserContext, userId),
+      }));
 
-      // Validate required fields
-      if (!query) {
-        return res.status(400).json({ error: 'Query is required' });
-      }
-
-      // Validate query is a string and not too long
-      if (typeof query !== 'string') {
-        return res.status(400).json({ error: 'Query must be a string' });
-      }
-
-      if (query.trim().length === 0) {
-        return res.status(400).json({ error: 'Query cannot be empty' });
-      }
-
-      // if (query.length > 10000) {
-      //   return res.status(400).json({ error: 'Query is too long. Maximum length is 10000 characters.' });
-      // }
-
-      // Normalize empty string to null for profileId
-      const normalizedProfileId = profileId === '' ? null : profileId;
-
-      if (normalizedProfileId) {
-        // Validate profileId is a valid UUID only if provided
-        if (!isValidUUID(normalizedProfileId)) {
-          return res.status(400).json({ error: 'Invalid Profile ID format. Expected a valid UUID.' });
-        }
-      }
-
-      // Validate k parameter
-      if (typeof k !== 'number' || k < 1 || k > 100 || !Number.isInteger(k)) {
-        return res.status(400).json({ error: 'Parameter k must be an integer between 1 and 100' });
-      }
-
-      // Silent fallback for unknown/deprecated/premium-denied models (backwards compat with older clients)
-      const FALLBACK_MODEL = 'gemini-2.5-flash';
-      const FALLBACK_MODEL_LABEL = 'Gemini 2.5 Flash';
-      let effectiveModel = model;
-      let originalModel: string | null = null;
-      let fallbackReason: 'unknown' | 'premium' | 'unsupported' | null = null;
-      // Case 1: middleware already flagged a fallback (premium or unsupported)
-      const middlewareFallbackFrom = (req as any).modelFallbackFrom as string | undefined;
-      const middlewareFallbackReason = (req as any).modelFallbackReason as string | undefined;
-      if (middlewareFallbackFrom) {
-        originalModel = middlewareFallbackFrom;
-        effectiveModel = FALLBACK_MODEL;
-        fallbackReason = middlewareFallbackReason === 'unsupported' ? 'unsupported' : 'premium';
-      } else if (model && !getModelConfig(model)) {
-        // Case 2: unknown model key from older clients
-        originalModel = model;
-        effectiveModel = FALLBACK_MODEL;
-        fallbackReason = 'unknown';
-        Logger.warn(`Unknown model '${originalModel}' requested, falling back to ${FALLBACK_MODEL}`);
-      }
-
-      // Validate chatHistory
-      const chatHistoryValidation = validateChatHistory(chatHistory);
-      if (!chatHistoryValidation.valid) {
-        return res.status(400).json({ error: chatHistoryValidation.error });
-      }
-
-      // TODO: Public access disabled - uncomment IP credit logic below to re-enable
-      if (!isAuthenticated) {
-        return res.status(401).json({ error: 'Authentication required' });
-
-        // IP rate limiting for unauthenticated users (disabled)
-        // const clientIP = getClientIP(req);
-        // console.log('clientIP', clientIP);
-        // if (!clientIP) {
-        //   return res.status(400).json({ error: 'Unable to identify client IP' });
-        // }
-
-        // ipCredit = await getOrCreateIpCredit(clientIP);
-
-        // // Check if IP has sufficient credits
-        // if (ipCredit.credits <= 0) {
-        //   return res.status(429).json({
-        //     error: 'Insufficient credits',
-        //     credits: ipCredit.credits,
-        //     tokensUsed: ipCredit.tokensUsed,
-        //   });
-        // }
-      }
-
-      let contextSummaries: string[] = [];
-      let effectiveUserId = userId || 'anonymous';
-
-      // Only process profile and contexts if profileId is provided
-      if (normalizedProfileId) {
-        // Permission check: must have viewer+ access
-        const access = await resolveProfileAccess(userId as string, normalizedProfileId);
-        if (!access.hasAccess) {
-          return res.status(404).json({ error: 'Profile not found' });
-        }
-
-        effectiveUserId = access.ownerId || userId || 'anonymous';
-
-        // Get context summaries for this profile
-        const contexts = await userContextRepository.find({
-          where: { profileId: normalizedProfileId },
-          order: { createdAt: 'ASC' },
-        });
-
-        contextSummaries = contexts.map((context) => JSON.stringify(context.description));
-        Logger.info(`contextSummaries: ${contextSummaries.length} summaries loaded`);
-      } else {
-        // No profile mode - just use empty context summaries
-        Logger.info('No profile provided, running query without context');
-      }
-
-      // Call the Python AI service endpoint for querying contexts
-      const requestPayload = {
-        query,
-        userId: effectiveUserId,
-        profileId: normalizedProfileId || '',
-        k,
-        chatHistory,
-        contextSummary: contextSummaries,
-        enableWebSearch,
-        enableUrlExtraction,
-        model: effectiveModel, // Selected LLM model (gemini or bedrock model key)
-        requestingUserId: userId, // Actual user for permission checks (may differ from effectiveUserId on shared buckets)
-      };
-
-      // Track per-user query request
-
-      userQueryRequests.inc({ user_id: userId || 'anonymous', endpoint_type: 'agentic-query' });
-
-      Logger.info(
-        `[AI_QUERY] user=${userId}, model=${effectiveModel}, profile=${normalizedProfileId || 'none'}, chatHistory=${
-          chatHistory.length
-        }`,
-      );
-      const response = await axios.post(`${process.env.AI_SERVICE_URL}/rag/agentic-query`, requestPayload, {
-        headers: {
-          'Content-Type': 'application/json',
-          'X-API-Key': process.env.AI_SERVICE_API_KEY as string,
-        },
-      });
-
-      if (response.status !== 200) {
-        Logger.error('Failed to query contexts from AI service');
-        return res.status(500).json({ error: 'Failed to query contexts from AI service' });
-      }
-
-      // TODO: Public access disabled - credit deduction for unauthenticated users
-      // if (!isAuthenticated && ipCredit) {
-      //   const tokensUsed = response.data?.tokens_used?.total_tokens || 1; // eslint-disable-line
-      //   const creditCost = Math.ceil(tokensUsed / 100); // 1 credit per 100 tokens (adjust as needed)
-
-      //   ipCredit.credits = Math.max(0, ipCredit.credits - creditCost);
-      //   ipCredit.tokensUsed += tokensUsed;
-      //   await ipCreditRepository.save(ipCredit);
-
-      //   // Add credit information to response
-      //   response.data.credits = {
-      //     remaining: ipCredit.credits,
-      //     used: creditCost,
-      //     totalTokensUsed: ipCredit.tokensUsed,
-      //   };
-      // }
-
-      // Deduct credits per model — reasoning (Gemini) and response (selected model) at their own rates
-      // Reasoning tokens are charged at discounted rate (1 credit per 300 tokens) since they include
-      // invisible thinking tokens that the user doesn't see
-      const tokensUsed = response?.data?.tokens_used;
-      if (tokensUsed?.reasoning?.total_tokens != null) {
-        const { reasoning, response: respTokens } = tokensUsed;
-        if (reasoning?.total_tokens > 0) {
-          const r1 = await deductCredits(userId as string, reasoning.total_tokens, reasoning.model, {
-            tokenDivisor: 300,
-          });
-          if (!r1.success) Logger.error(`[AI_QUERY] Failed to deduct reasoning credits for user: ${userId}`);
-        }
-        if (respTokens?.total_tokens > 0 && respTokens.model !== reasoning?.model) {
-          const r2 = await deductCredits(userId as string, respTokens.total_tokens, respTokens.model || effectiveModel);
-          if (!r2.success) Logger.error(`[AI_QUERY] Failed to deduct response credits for user: ${userId}`);
-        }
-      } else if (tokensUsed?.total_tokens) {
-        // Fallback for old response format (single total)
-        const result = await deductCredits(userId as string, tokensUsed.total_tokens, effectiveModel);
-        if (!result.success) Logger.error(`[AI_QUERY] Failed to deduct credits for user: ${userId}`);
-      }
-
-      // If we silently fell back, append an italic markdown disclaimer to the answer
-      if (originalModel && response.data) {
-        const disclaimer =
-          fallbackReason === 'premium'
-            ? `\n\n*The model '${originalModel}' requires a premium plan. This response was generated using ${FALLBACK_MODEL_LABEL} instead.*`
-            : fallbackReason === 'unsupported'
-            ? `\n\n*The model '${originalModel}' is no longer supported. This response was generated using ${FALLBACK_MODEL_LABEL} instead.*`
-            : `\n\n*The requested model '${originalModel}' was not recognized. This response was generated using ${FALLBACK_MODEL_LABEL} instead.*`;
-        if (typeof response.data.answer === 'string') {
-          response.data.answer += disclaimer;
-        } else if (typeof response.data.response === 'string') {
-          response.data.response += disclaimer;
-        }
-      }
-
-      // Return the AI service response
-      res.status(200).json(response.data);
-    } catch (error) {
-      Logger.error('Error in RAG query controller:', error);
-      res.status(500).send('Internal Server Error');
+      return res.status(200).json({ contexts: contextsWithPermissions });
     }
-  },
-);
-// Generate optimize prompt for RAG query
-contextRouter.post(
-  '/generate-prompt',
-  isAuthenticated,
-  checkSubscriptionAndCreditLimit,
-  async (req: Request, res: Response) => {
-    // #swagger.tags = ['AI-Context']
-    /* #swagger.security = [{
-            "bearerAuth": []
-    }] */
-    try {
-      const userId = req?.user?.id;
-      const { query, profileId, k = 5, chatHistory = [], platform = 'chatGPT' } = req.body;
 
-      // Validate required fields
-      if (!query) {
-        return res.status(400).json({ error: 'Query is required' });
-      }
+    // No profileId — return only the user's own contexts
+    const contexts = await userContextRepository.find({
+      where: { userId },
+      order: { createdAt: 'ASC' },
+    });
 
-      // Validate query is a string and not too long
-      if (typeof query !== 'string') {
-        return res.status(400).json({ error: 'Query must be a string' });
-      }
-
-      if (query.trim().length === 0) {
-        return res.status(400).json({ error: 'Query cannot be empty' });
-      }
-
-      // if (query.length > 10000) {
-      //   return res.status(400).json({ error: 'Query is too long. Maximum length is 10000 characters.' });
-      // }
-
-      // Validate k parameter
-      if (typeof k !== 'number' || k < 1 || k > 100 || !Number.isInteger(k)) {
-        return res.status(400).json({ error: 'Parameter k must be an integer between 1 and 100' });
-      }
-
-      // Validate chatHistory
-      const chatHistoryValidation = validateChatHistory(chatHistory);
-      if (!chatHistoryValidation.valid) {
-        return res.status(400).json({ error: chatHistoryValidation.error });
-      }
-
-      // no profile flow to optimized query
-      if (!profileId) {
-        const requestPayload = {
-          query,
-          userId: userId,
-          profileId: '',
-          k,
-          chatHistory,
-          platform,
-        };
-
-        // Track per-user RAG request (no profile)
-
-        userRagRequests.inc({ user_id: userId, endpoint_type: 'agentic-rag-no-profile' });
-
-        Logger.info(`[OPTIMIZE_PROMPT] user=${userId}, profile=none, chatHistory=${chatHistory.length}`);
-        const response = await axios.post(`${process.env.AI_SERVICE_URL}/rag/optimize-prompt`, requestPayload, {
-          headers: {
-            'Content-Type': 'application/json',
-            'X-API-Key': process.env.AI_SERVICE_API_KEY as string,
-          },
-        });
-
-        if (response.status !== 200) {
-          Logger.error('Failed to query contexts from AI service');
-          return res.status(500).json({ error: 'Failed to query contexts from AI service' });
-        }
-
-        // Deduct credits
-        if (response?.data?.tokens_used?.total_tokens) {
-          Logger.info('Deducting credits for user:', userId);
-          const result = await deductCredits(
-            userId as string,
-            response.data?.tokens_used?.total_tokens || 1,
-            response.data?.tokens_used?.model,
-            { tokenDivisor: 200 },
-          );
-          if (!result.success) Logger.error('[OPTIMIZE_PROMPT] Failed to deduct credits for user:', userId);
-        }
-
-        // Return the AI service response
-        res.status(200).json(response.data);
-      } else {
-        // Validate profileId is a valid UUID
-        if (!isValidUUID(profileId)) {
-          return res.status(400).json({ error: 'Invalid Profile ID format. Expected a valid UUID.' });
-        }
-
-        // Permission check: must have viewer+ access
-        const access = await resolveProfileAccess(userId as string, profileId as string);
-        if (!access.hasAccess) {
-          return res.status(404).json({ error: 'Profile not found' });
-        }
-
-        const effectiveUserId = access.ownerId || userId;
-
-        const contexts = await userContextRepository.find({
-          where: { profileId },
-          order: { createdAt: 'ASC' },
-        });
-
-        const contextSummaries = contexts.map((context) => JSON.stringify(context.description));
-
-        // Call the Python AI service endpoint for optimize prompt
-        const requestPayload = {
-          query,
-          userId: effectiveUserId || 'anonymous',
-          profileId,
-          k,
-          chatHistory,
-          contextSummary: contextSummaries,
-          platform,
-        };
-
-        // Track per-user RAG request (with profile)
-
-        userRagRequests.inc({ user_id: userId || 'anonymous', endpoint_type: 'agentic-rag-with-profile' });
-
-        Logger.info(`[OPTIMIZE_PROMPT] user=${userId}, profile=${profileId}, chatHistory=${chatHistory.length}`);
-        const response = await axios.post(`${process.env.AI_SERVICE_URL}/rag/optimize-prompt`, requestPayload, {
-          headers: {
-            'Content-Type': 'application/json',
-            'X-API-Key': process.env.AI_SERVICE_API_KEY as string,
-          },
-        });
-
-        if (response.status !== 200) {
-          Logger.error('Failed to query contexts from AI service');
-          return res.status(500).json({ error: 'Failed to query contexts from AI service' });
-        }
-
-        // Deduct credits
-        if (response?.data?.tokens_used?.total_tokens) {
-          Logger.info('Deducting credits for user:', userId);
-          const result = await deductCredits(
-            userId as string,
-            response.data?.tokens_used?.total_tokens || 1,
-            response.data?.tokens_used?.model,
-            { tokenDivisor: 200 },
-          );
-          if (!result.success) Logger.error('[OPTIMIZE_PROMPT] Failed to deduct credits for user:', userId);
-        }
-
-        // Return the AI service response
-        res.status(200).json(response.data);
-      }
-    } catch (error) {
-      Logger.error('Error in RAG query controller:', error);
-      res.status(500).send('Internal Server Error');
-    }
-  },
-);
-
-contextRouter.get(
-  '/',
-  isAuthenticatedNativeOrMcp('mcp:tools'),
-  chargeMcpCall(1),
-  async (req: Request, res: Response) => {
-    // #swagger.tags = ['AI-Context']
-    /* #swagger.security = [{
-            "bearerAuth": []
-    }] */
-    try {
-      const userId = req?.user?.id;
-      const { profileId } = req.query;
-
-      if (!userId) {
-        return res.status(401).json({ error: 'User not authenticated' });
-      }
-
-      // Validate profileId if provided
-      if (profileId && !isValidUUID(profileId as string)) {
-        return res.status(400).json({ error: 'Invalid Profile ID format. Expected a valid UUID.' });
-      }
-
-      if (profileId) {
-        // Permission check: must have viewer+ access to the bucket
-        const access = await resolveProfileAccess(userId as string, profileId as string);
-        if (!access.hasAccess) {
-          return res.status(404).json({ error: 'Profile not found' });
-        }
-
-        // Get all contexts for this profile with addedBy user info
-        // COALESCE: if addedBy is NULL (pre-sharing context), fall back to owner
-        const rawContexts = await userContextRepository
-          .createQueryBuilder('c')
-          .leftJoin(User, 'u', 'u.id = COALESCE(c.addedBy, :ownerId)', { ownerId: access.ownerId })
-          .select(['c.*', 'u.name AS "addedByName"', 'u.email AS "addedByEmail"', 'u.authAddress AS "addedByWallet"'])
-          .where('c.profileId = :profileId', { profileId })
-          .orderBy('c.createdAt', 'ASC')
-          .getRawMany();
-
-        // Add canEdit flag and addedByUser per context
-        const contextsWithPermissions = rawContexts.map((ctx) => ({
-          contextId: ctx.contextId,
-          userId: ctx.userId,
-          profileId: ctx.profileId,
-          title: ctx.title,
-          description: ctx.description,
-          status: ctx.status,
-          errorMessage: ctx.errorMessage,
-          vectorIds: ctx.vectorIds,
-          createdAt: ctx.createdAt,
-          originalFileName: ctx.originalFileName,
-          sourceType: ctx.sourceType,
-          sourcePlatform: ctx.sourcePlatform,
-          sourceUrl: ctx.sourceUrl,
-          contentSize: ctx.contentSize,
-          addedBy:
-            ctx.addedByName || ctx.addedByEmail || ctx.addedByWallet
-              ? {
-                  id: ctx.addedBy || access.ownerId,
-                  name: ctx.addedByName || null,
-                  email: ctx.addedByEmail || null,
-                  wallet: ctx.addedByWallet || null,
-                  isOwner: !ctx.addedBy || ctx.addedBy === access.ownerId,
-                }
-              : // addedBy set but user deleted, or no user record found
-                { id: ctx.addedBy || access.ownerId, name: null, isOwner: !ctx.addedBy },
-          canEdit: canEditContext(access, ctx as UserContext, userId),
-        }));
-
-        return res.status(200).json({ contexts: contextsWithPermissions });
-      }
-
-      // No profileId — return only the user's own contexts
-      const contexts = await userContextRepository.find({
-        where: { userId },
-        order: { createdAt: 'ASC' },
-      });
-
-      res.status(200).json({ contexts });
-    } catch (error) {
-      Logger.error('Error fetching user contexts:', error);
-      res.status(500).json({ error: 'Internal Server Error' });
-    }
-  },
-);
+    res.status(200).json({ contexts });
+  } catch (error) {
+    Logger.error('Error fetching user contexts:', error);
+    res.status(500).json({ error: 'Internal Server Error' });
+  }
+});
 
 /**
  * SSE endpoint for real-time context processing updates
@@ -1104,6 +579,7 @@ contextRouter.get('/events', isAuthenticated, (req: Request, res: Response) => {
   } */
   try {
     const userId = req?.user?.id;
+    const authAddress = req?.user?.authAddress;
     if (!userId) {
       Logger.warn('SSE connection attempt without userId');
       return res.status(401).json({ error: 'Unauthorized' });
@@ -1129,6 +605,7 @@ contextRouter.get('/:contextId', isAuthenticatedNativeOrMcp('mcp:tools'), async 
     }] */
   try {
     const userId = req?.user?.id;
+    const authAddress = req?.user?.authAddress;
     const { contextId } = req.params;
 
     if (!userId) {
@@ -1149,7 +626,7 @@ contextRouter.get('/:contextId', isAuthenticatedNativeOrMcp('mcp:tools'), async 
     }
 
     // Permission check: must have viewer+ access to the parent bucket
-    const access = await resolveProfileAccess(userId as string, context.profileId);
+    const access = await resolveProfileAccess(authAddress as string, userId as string, context.profileId);
     if (!access.hasAccess) {
       return res.status(404).json({ error: 'Context not found' });
     }
@@ -1171,12 +648,12 @@ contextRouter.get('/:contextId', isAuthenticatedNativeOrMcp('mcp:tools'), async 
 contextRouter.get(
   '/:contextId/content',
   isAuthenticatedNativeOrMcp('mcp:tools'),
-  chargeMcpCall(5),
   async (req: Request, res: Response) => {
     // #swagger.tags = ['AI-Context']
     /* #swagger.security = [{ "bearerAuth": [] }] */
     try {
       const userId = req?.user?.id;
+      const authAddress = req?.user?.authAddress;
       const { contextId } = req.params;
       const { startChunk = '0', limit = '0' } = req.query;
 
@@ -1192,7 +669,7 @@ contextRouter.get(
         return res.status(404).json({ error: 'Context not found' });
       }
 
-      const access = await resolveProfileAccess(userId as string, context.profileId);
+      const access = await resolveProfileAccess(authAddress as string, userId as string, context.profileId);
       if (!access.hasAccess) {
         return res.status(404).json({ error: 'Context not found' });
       }
@@ -1248,6 +725,7 @@ contextRouter.delete('/:contextId', isAuthenticatedNativeOrMcp('mcp:tools'), asy
     }] */
   try {
     const userId = req?.user?.id;
+    const authAddress = req?.user?.authAddress;
     const { contextId } = req.params;
 
     if (!userId) {
@@ -1274,9 +752,15 @@ contextRouter.delete('/:contextId', isAuthenticatedNativeOrMcp('mcp:tools'), asy
     }
 
     // Permission check: must have edit access to this context
-    const access = await resolveProfileAccess(userId as string, userContext.profileId);
+    const access = await resolveProfileAccess(authAddress as string, userId as string, userContext.profileId);
     if (!access.hasAccess || !canEditContext(access, userContext, userId)) {
       return res.status(403).json({ error: 'You do not have permission to delete this context' });
+    }
+    if (access.isImmutable) {
+      return res.status(403).json({
+        error: 'bucket_immutable',
+        message: 'This bucket has been minted and is read-only. Contexts cannot be deleted.',
+      });
     }
 
     const effectiveUserId = access.ownerId || userId;
@@ -1302,6 +786,7 @@ contextRouter.delete('/:contextId', isAuthenticatedNativeOrMcp('mcp:tools'), asy
 
     // Delete the context from database
     await userContextRepository.remove(userContext);
+    refreshBucketHash(deletedProfileId);
 
     // Fire-and-forget: activity log + notifications
     logActivity(deletedProfileId, userId as string, 'context_deleted', {
@@ -1327,30 +812,6 @@ contextRouter.delete('/:contextId', isAuthenticatedNativeOrMcp('mcp:tools'), asy
     });
   } catch (error) {
     Logger.error('Error deleting user context:', error);
-    res.status(500).json({ error: 'Internal Server Error' });
-  }
-});
-
-// GET: Check credits for IP address (public endpoint)
-contextRouter.get('/credits', async (req: Request, res: Response) => {
-  // #swagger.tags = ['AI-Context']
-  try {
-    const clientIP = getClientIP(req);
-    if (!clientIP) {
-      return res.status(400).json({ error: 'Unable to identify client IP' });
-    }
-
-    const ipCredit = await getOrCreateIpCredit(clientIP);
-
-    res.status(200).json({
-      ipAddress: clientIP,
-      credits: ipCredit.credits,
-      tokensUsed: ipCredit.tokensUsed,
-      createdAt: ipCredit.createdAt,
-      updatedAt: ipCredit.updatedAt,
-    });
-  } catch (error) {
-    Logger.error('Error fetching IP credits:', error);
     res.status(500).json({ error: 'Internal Server Error' });
   }
 });
@@ -1467,9 +928,7 @@ const handleMultipart = (req: Request, res: Response, next: any) => {
 contextRouter.post(
   '/upload-file',
   isAuthenticated,
-  checkSubscriptionAndCreditLimit,
   handleMultipart,
-  checkContextSizeLimitMiddleware,
   async (req: Request & { file?: Express.Multer.File }, res: Response) => {
     // #swagger.tags = ['AI-Context']
     /* #swagger.security = [{
@@ -1526,6 +985,7 @@ contextRouter.post(
     let userContext: any = null;
     try {
       const userId = req?.user?.id;
+      const authAddress = req?.user?.authAddress;
       const { profileId } = req.body;
 
       Logger.info(
@@ -1551,9 +1011,15 @@ contextRouter.post(
       }
 
       // Permission check: must have editor+ access
-      const access = await resolveProfileAccess(userId as string, profileId as string);
+      const access = await resolveProfileAccess(authAddress as string, userId as string, profileId as string);
       if (!access.hasAccess || !hasMinRole(access, 'editor')) {
         return res.status(404).json({ error: 'Profile not found or insufficient permissions' });
+      }
+      if (access.isImmutable) {
+        return res.status(403).json({
+          error: 'bucket_immutable',
+          message: 'This bucket has been minted and is read-only. Add contexts to a different bucket.',
+        });
       }
 
       const effectiveOwnerId = access.ownerId || userId;
@@ -1580,8 +1046,10 @@ contextRouter.post(
         sourceType: 'file',
         contentSize: req.file.size,
         addedBy: userId,
+        contentHash: hashContent(req.file.buffer), // SHA-256 for on-chain provenance
       });
       await userContextRepository.save(userContext);
+      refreshBucketHash(profileId);
 
       // Create form data for the AI service
       const formData = new FormData();
@@ -1635,17 +1103,6 @@ contextRouter.post(
           profileName: profile.profileName,
         },
       );
-
-      // Deduct credits
-      if (response?.data?.tokens_used?.total_tokens) {
-        Logger.info('Deducting credits for user:', userId);
-        const result = await deductCredits(
-          userId as string,
-          response.data?.tokens_used?.total_tokens || 1,
-          response.data?.tokens_used?.model,
-        );
-        if (!result.success) Logger.error('[UPLOAD_FILE] Failed to deduct credits for user:', userId);
-      }
 
       // Return the AI service response along with the saved context info
       res.status(200).json({

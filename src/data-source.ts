@@ -22,8 +22,9 @@ export const AppDataSource = new DataSource({
     'src/services/user-service/entity/*.ts',
     'src/services/auth-service/entity/*.ts',
     'src/services/ai-service/entity/*.ts',
-    'src/services/subscription-service/entity/*.ts',
     'src/services/token-service/entity/*.ts',
+    // blockchain-service no longer owns any tables — NftMint/NftSnapshot
+    // collapsed into user_ai_profile (mintedTokenId, mintTxHash, listingActive…)
   ],
   synchronize: true,
   ssl: {

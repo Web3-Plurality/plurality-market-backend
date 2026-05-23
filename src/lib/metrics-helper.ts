@@ -3,8 +3,6 @@ import {
   dbQueryTotal,
   authAttempts,
   authDuration,
-  oauthCallDuration,
-  oauthCallTotal,
   externalApiCallDuration,
   externalApiCallTotal,
   llmCallDuration,
@@ -58,26 +56,6 @@ export async function measureAuth<T>(method: string, authFn: () => Promise<T>): 
     const duration = (Date.now() - start) / 1000;
     authAttempts.inc({ method, status });
     authDuration.observe({ method, status }, duration);
-  }
-}
-
-/**
- * Helper function to measure OAuth provider calls
- */
-export async function measureOAuthCall<T>(provider: string, operation: string, callFn: () => Promise<T>): Promise<T> {
-  const start = Date.now();
-  let status = 'success';
-
-  try {
-    const result = await callFn();
-    return result;
-  } catch (error) {
-    status = 'error';
-    throw error;
-  } finally {
-    const duration = (Date.now() - start) / 1000;
-    oauthCallDuration.observe({ provider, operation, status }, duration);
-    oauthCallTotal.inc({ provider, operation, status });
   }
 }
 

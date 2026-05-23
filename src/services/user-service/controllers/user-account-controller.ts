@@ -5,7 +5,6 @@ import { User } from '../entity/user';
 import { UserSession } from '../../auth-service/entity/user-session';
 import { UserAiProfile } from '../../ai-service/entity/user-ai-profile';
 import { UserContext } from '../../ai-service/entity/user-context';
-import { ProfileAccess } from '../../ai-service/entity/profile-access';
 import { ActivityLog } from '../../ai-service/entity/activity-log';
 import { Notification } from '../../ai-service/entity/notification';
 import { isAuthenticated } from '../middlewares/auth-middleware';
@@ -137,14 +136,6 @@ userAccountRouter.delete('/', isAuthenticated, async (req: Request, res: Respons
     await queryRunner.connect();
     await queryRunner.startTransaction();
     try {
-      // Delete access entries where user is owner (shared profiles they owned)
-      await queryRunner.manager.delete(ProfileAccess, { ownerId: userId });
-      Logger.info(`[RIGHT-TO-FORGET] Deleted all owned access entries for user ${userId}`);
-
-      // Delete access entries where user is grantee (profiles shared with them)
-      await queryRunner.manager.delete(ProfileAccess, { grantedToId: userId });
-      Logger.info(`[RIGHT-TO-FORGET] Deleted all granted access entries for user ${userId}`);
-
       // Delete activity logs where user is actor
       await queryRunner.manager.delete(ActivityLog, { actorId: userId });
       Logger.info(`[RIGHT-TO-FORGET] Deleted all activity logs for user ${userId}`);

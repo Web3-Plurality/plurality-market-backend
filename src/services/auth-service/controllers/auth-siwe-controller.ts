@@ -7,7 +7,8 @@ import jwt from 'jsonwebtoken';
 import { LoginType, User } from '../../user-service/entity/user';
 import { AppDataSource } from '../../../data-source';
 import { AddUserSession, ensureChatEncKey } from '../utils/user';
-import { setAuthCookie } from '../utils/cookie';
+import { setAuthCookie, clearAuthCookie } from '../utils/cookie';
+import { isAuthenticated } from '../../user-service/middlewares/auth-middleware';
 import * as dotenv from 'dotenv';
 import { userOperations, authAttempts } from '../../../lib/metrics';
 
@@ -16,46 +17,65 @@ dotenv.config();
 export const authSiweRouter = express.Router();
 const userRepository = AppDataSource.getRepository(User);
 
-const userRegisterViaWallet = async (address: string) => {
-  let addedUser: any = {};
-  const normalizedAddress = address.toLowerCase();
-  // Case-insensitive lookup: compare lowercase on both sides
-  const existingUser = await userRepository
+// Find an existing user by case-insensitive authAddress. Used by both the
+// initial check and the race-condition fallback below.
+const findUserByLoweredAddress = (normalizedAddress: string) =>
+  userRepository
     .createQueryBuilder('u')
     .where('LOWER(u.authAddress) = :address', { address: normalizedAddress })
     .getOne();
+
+const userRegisterViaWallet = async (address: string) => {
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  let addedUser: any = {};
+  const normalizedAddress = address.toLowerCase();
+  let existingUser = await findUserByLoweredAddress(normalizedAddress);
   if (existingUser) {
     Logger.info(`This user already exists!`);
-    // Upgrade stub user if needed (created via sharing before sign-up)
     if (!existingUser.loginType || existingUser.loginType === '') {
       existingUser.loginType = LoginType.metamask;
       await userRepository.save(existingUser);
       Logger.info(`[SIWE] Upgraded stub user ${existingUser.id} to metamask login`);
     }
-    // Track existing user login
     authAttempts.inc({ method: 'siwe', status: 'success' });
   } else {
-    // If the user doesn't exist, insert a new row
-    const newUser = await userRepository.create({
-      authAddress: normalizedAddress,
-      subscribe: false,
-      loginType: LoginType.metamask,
-    });
-    Logger.info(`new user created with address: ${normalizedAddress}`);
-    addedUser = await userRepository.save(newUser);
-
-    // Track new user sign-up
-    userOperations.inc({ operation: 'signup', status: 'success' });
-    authAttempts.inc({ method: 'siwe', status: 'success' });
+    // Race-safe insert: two concurrent SIWE calls for the same wallet could
+    // both miss the existing-user check above and try to insert. If a
+    // functional UNIQUE index exists on LOWER(authAddress), the second insert
+    // throws — catch it, re-fetch, and use the row the other request created.
+    // (See scripts/dedupe-users.sql for the recommended index.)
+    try {
+      const newUser = userRepository.create({
+        authAddress: normalizedAddress,
+        subscribe: false,
+        loginType: LoginType.metamask,
+      });
+      addedUser = await userRepository.save(newUser);
+      Logger.info(`new user created with address: ${normalizedAddress}`);
+      userOperations.inc({ operation: 'signup', status: 'success' });
+      authAttempts.inc({ method: 'siwe', status: 'success' });
+    } catch (err) {
+      // Unique-violation from the functional index — another request won.
+      existingUser = await findUserByLoweredAddress(normalizedAddress);
+      if (!existingUser) {
+        Logger.error('[SIWE] Insert raced AND re-fetch returned null', err);
+        throw err;
+      }
+      Logger.info(`[SIWE] Insert raced; using existing user ${existingUser.id}`);
+      authAttempts.inc({ method: 'siwe', status: 'success' });
+    }
   }
 
   const userId = existingUser?.id ? existingUser?.id : addedUser?.id;
-  const uniqueSessionId = await AddUserSession(userId);
+  await AddUserSession(userId); // login audit row; id is no longer embedded in the JWT
   const chatEncKey = await ensureChatEncKey(userId);
-  const token = jwt.sign({ id: userId, uniqueSessionId }, process.env.JWT_SECRET || '', {
+  // Wallet address is the canonical identifier across the stack. `id` is
+  // carried alongside as a denormalized perf shortcut so protected routes
+  // can read `req.user.id` without a User-table lookup per request.
+  const token = jwt.sign({ authAddress: normalizedAddress, id: userId }, process.env.JWT_SECRET || '', {
     expiresIn: process.env.JWT_EXPIRY,
   });
-  Logger.info(`jwt token generated for user id ${userId}`);
+  Logger.info(`jwt token generated for wallet ${normalizedAddress} (user ${userId})`);
   return { token, user: existingUser?.id ? existingUser : addedUser, chatEncKey };
 };
 
@@ -164,5 +184,33 @@ authSiweRouter.post('/authenticate', async function (req: Request, res: Response
     // Track failed authentication attempt
     authAttempts.inc({ method: 'siwe', status: 'error' });
     res.status(401).send('Authentication failed');
+  }
+});
+
+// POST /auth/siwe/logout — clear the HttpOnly auth cookie.
+// Always returns 200 even if there was no cookie; logout shouldn't error.
+authSiweRouter.post('/logout', (_req: Request, res: Response) => {
+  // #swagger.tags = ['Auth']
+  clearAuthCookie(res);
+  return res.status(200).json({ success: true });
+});
+
+// GET /auth/siwe/session — used by the frontend on page load to probe whether
+// the HttpOnly cookie is still valid. Returns the resolved user info if so,
+// 401 otherwise. Lighter than calling a protected endpoint and inferring auth
+// from the response shape.
+authSiweRouter.get('/session', isAuthenticated, async (req: Request, res: Response) => {
+  // #swagger.tags = ['Auth']
+  try {
+    const userId = req?.user?.id;
+    const authAddress = req?.user?.authAddress;
+    if (!userId || !authAddress) {
+      return res.status(401).json({ success: false });
+    }
+    const chatEncKey = await ensureChatEncKey(userId);
+    return res.status(200).json({ success: true, userId, authAddress, chatEncKey });
+  } catch (err) {
+    Logger.error(`[siwe/session] error: ${err}`);
+    return res.status(500).json({ success: false });
   }
 });

@@ -2,6 +2,7 @@ import { Entity, Column, PrimaryGeneratedColumn, CreateDateColumn, Index } from 
 
 @Entity('personal_access_token')
 @Index(['userId'])
+@Index(['authAddress'])
 @Index(['tokenHash'], { unique: true })
 export class PersonalAccessToken {
   @PrimaryGeneratedColumn('uuid')
@@ -9,6 +10,15 @@ export class PersonalAccessToken {
 
   @Column({ type: 'uuid' })
   userId: string;
+
+  // Denormalized wallet address of the PAT owner. Stamped at create time from
+  // the SIWE-authenticated session. PAT verify returns this directly so MCP /
+  // backend callers can resolve wallet identity without joining the users
+  // table on the hot path.
+  // Nullable in the schema for safety during the rewrite — wipe-and-redeploy
+  // (Phase 12) starts everyone fresh with a non-null value.
+  @Column({ type: 'varchar', length: 42, nullable: true })
+  authAddress: string | null;
 
   @Column({ type: 'varchar', length: 255 })
   tokenHash: string;

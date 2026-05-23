@@ -108,30 +108,6 @@ export const activeSessions = new Gauge({
   registers: [register],
 });
 
-// ===== OAuth Provider Metrics =====
-
-export const oauthCallDuration = new Histogram({
-  name: 'plurality_backend_oauth_call_duration_seconds',
-  help: 'Duration of OAuth provider API calls',
-  labelNames: ['provider', 'operation', 'status'],
-  buckets: [0.1, 0.5, 1, 2, 5, 10, 30],
-  registers: [register],
-});
-
-export const oauthCallTotal = new Counter({
-  name: 'plurality_backend_oauth_calls_total',
-  help: 'Total number of OAuth provider API calls',
-  labelNames: ['provider', 'operation', 'status'],
-  registers: [register],
-});
-
-export const oauthErrors = new Counter({
-  name: 'plurality_backend_oauth_errors_total',
-  help: 'Total number of OAuth errors',
-  labelNames: ['provider', 'error_type'],
-  registers: [register],
-});
-
 // ===== External API Metrics =====
 
 export const externalApiCallDuration = new Histogram({

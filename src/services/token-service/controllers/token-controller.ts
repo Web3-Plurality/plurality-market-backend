@@ -4,15 +4,13 @@ import { AppDataSource } from '../../../data-source';
 import Logger from '../../../lib/logger';
 import { authAttempts } from '../../../lib/metrics';
 import { isAuthenticated } from '../../user-service/middlewares/auth-middleware';
-import { getOrCreateUserSubscription, isPaidPlan } from '../../subscription-service/utils';
 import { PersonalAccessToken } from '../entity/personal-access-token';
 import { generateToken, hashToken, verifyTokenHash, isPatToken } from '../utils/token-utils';
-import { PAT_LIMIT_PAID } from '../utils/limits';
+import { PAT_LIMIT, ALLOWED_PAT_SCOPES, AllowedPatScope } from '../utils/limits';
 
 export const tokenRouter = express.Router();
 const tokenRepository = AppDataSource.getRepository(PersonalAccessToken);
 
-// Resolve the optional `expiresIn` field from the create request to an absolute timestamp.
 function resolveExpiresAt(expiresIn: string | undefined): Date | null {
   if (!expiresIn || expiresIn === 'never') return null;
   const days = parseInt(expiresIn.replace(/[^0-9]/g, ''), 10);
@@ -22,13 +20,11 @@ function resolveExpiresAt(expiresIn: string | undefined): Date | null {
   return d;
 }
 
-// Extract client IP — respects trust proxy setting set in index.ts.
 function getClientIp(req: Request): string | null {
   const ip = (req.ip || req.socket?.remoteAddress || '').toString();
   return ip.length > 0 ? ip.slice(0, 45) : null;
 }
 
-// Active = not revoked, not expired, not the old half of a rotation.
 function activeFilter(userId: string) {
   return {
     userId,
@@ -37,14 +33,30 @@ function activeFilter(userId: string) {
   };
 }
 
-// ── POST /api/tokens — create a new PAT ───────────────────────────────
+// Validate + normalize scopes from request body. Returns null if any scope is
+// not in the allowed set; otherwise returns the deduped list (defaulted to
+// ['mcp:tools'] when caller omits the field or sends an empty array).
+function validateScopes(raw: unknown): AllowedPatScope[] | null {
+  if (raw === undefined || raw === null) return ['mcp:tools'];
+  if (!Array.isArray(raw)) return null;
+  if (raw.length === 0) return ['mcp:tools'];
+  const allowed = new Set<string>(ALLOWED_PAT_SCOPES);
+  const seen = new Set<AllowedPatScope>();
+  for (const s of raw) {
+    if (typeof s !== 'string' || !allowed.has(s)) return null;
+    seen.add(s as AllowedPatScope);
+  }
+  return Array.from(seen);
+}
+
+// ── POST /pat/tokens ── create a new PAT
 tokenRouter.post('/', isAuthenticated, async (req: Request, res: Response) => {
-  // #swagger.tags = ['Tokens']
   try {
     const userId = req.user?.id;
-    if (!userId) return res.status(401).json({ error: 'unauthenticated' });
+    const authAddress = req.user?.authAddress;
+    if (!userId || !authAddress) return res.status(401).json({ error: 'unauthenticated' });
 
-    const { name, expiresIn } = req.body || {};
+    const { name, expiresIn, scopes: rawScopes } = req.body || {};
     if (!name || typeof name !== 'string' || name.trim().length === 0) {
       return res.status(400).json({ error: 'name is required' });
     }
@@ -52,26 +64,24 @@ tokenRouter.post('/', isAuthenticated, async (req: Request, res: Response) => {
       return res.status(400).json({ error: 'name is too long (max 100 chars)' });
     }
 
-    // Plan gate: free users cannot create PATs
-    const subscription = await getOrCreateUserSubscription(userId);
-    if (!isPaidPlan(subscription)) {
-      return res.status(402).json({
-        error: 'pat_requires_paid_plan',
-        message: 'API tokens are available on paid plans. Upgrade to create a token.',
+    const scopes = validateScopes(rawScopes);
+    if (!scopes) {
+      return res.status(400).json({
+        error: 'invalid_scopes',
+        message: `scopes must be a subset of ${ALLOWED_PAT_SCOPES.join(', ')}`,
       });
     }
 
-    // Active-token cap
     const activeCount = await tokenRepository.count({
       where: [
         { ...activeFilter(userId), expiresAt: IsNull() },
         { ...activeFilter(userId), expiresAt: MoreThan(new Date()) },
       ],
     });
-    if (activeCount >= PAT_LIMIT_PAID) {
+    if (activeCount >= PAT_LIMIT) {
       return res.status(429).json({
         error: 'pat_limit_reached',
-        limit: PAT_LIMIT_PAID,
+        limit: PAT_LIMIT,
         active: activeCount,
         message: 'Token limit reached. Revoke an existing token to create a new one.',
       });
@@ -82,19 +92,22 @@ tokenRouter.post('/', isAuthenticated, async (req: Request, res: Response) => {
 
     const entity = tokenRepository.create({
       userId,
+      authAddress,
       tokenHash: hash,
       tokenPrefix: prefix,
       name: name.trim(),
-      scopes: ['mcp:tools'],
+      scopes,
       expiresAt,
       createdIp: getClientIp(req),
     });
     const saved = await tokenRepository.save(entity);
 
-    Logger.info(`[PAT] Created token ${saved.id} for user ${userId}`);
+    Logger.info(
+      `[PAT] Created token ${saved.id} for wallet ${authAddress} (user ${userId}) scopes=${scopes.join(',')}`,
+    );
     return res.status(201).json({
       id: saved.id,
-      token: plaintext, // plaintext returned exactly once
+      token: plaintext,
       name: saved.name,
       tokenPrefix: saved.tokenPrefix,
       scopes: saved.scopes,
@@ -107,9 +120,8 @@ tokenRouter.post('/', isAuthenticated, async (req: Request, res: Response) => {
   }
 });
 
-// ── GET /api/tokens — list active + recently-revoked tokens ────────────
+// ── GET /pat/tokens ── list active + recently-revoked tokens
 tokenRouter.get('/', isAuthenticated, async (req: Request, res: Response) => {
-  // #swagger.tags = ['Tokens']
   try {
     const userId = req.user?.id;
     if (!userId) return res.status(401).json({ error: 'unauthenticated' });
@@ -156,9 +168,8 @@ function deriveStatus(t: PersonalAccessToken, now: Date): 'active' | 'expired' |
   return 'active';
 }
 
-// ── DELETE /api/tokens/:id — revoke ─────────────────────────────────────
+// ── DELETE /pat/tokens/:id ── revoke
 tokenRouter.delete('/:id', isAuthenticated, async (req: Request, res: Response) => {
-  // #swagger.tags = ['Tokens']
   try {
     const userId = req.user?.id;
     if (!userId) return res.status(401).json({ error: 'unauthenticated' });
@@ -169,7 +180,7 @@ tokenRouter.delete('/:id', isAuthenticated, async (req: Request, res: Response) 
       return res.status(404).json({ error: 'token_not_found' });
     }
     if (token.revokedAt) {
-      return res.status(204).send(); // already revoked, idempotent
+      return res.status(204).send();
     }
 
     token.revokedAt = new Date();
@@ -183,9 +194,8 @@ tokenRouter.delete('/:id', isAuthenticated, async (req: Request, res: Response) 
   }
 });
 
-// ── POST /api/tokens/:id/rotate — issue replacement, schedule old to revoke ──
+// ── POST /pat/tokens/:id/rotate ── issue replacement, schedule old to revoke
 tokenRouter.post('/:id/rotate', isAuthenticated, async (req: Request, res: Response) => {
-  // #swagger.tags = ['Tokens']
   try {
     const userId = req.user?.id;
     if (!userId) return res.status(401).json({ error: 'unauthenticated' });
@@ -207,6 +217,7 @@ tokenRouter.post('/:id/rotate', isAuthenticated, async (req: Request, res: Respo
       const { plaintext, prefix, hash } = generateToken();
       const newToken = repo.create({
         userId,
+        authAddress: oldToken.authAddress,
         tokenHash: hash,
         tokenPrefix: prefix,
         name: oldToken.name,
@@ -219,7 +230,7 @@ tokenRouter.post('/:id/rotate', isAuthenticated, async (req: Request, res: Respo
       const graceEnd = new Date();
       graceEnd.setDate(graceEnd.getDate() + gracePeriodDays);
       oldToken.rotatedToId = savedNew.id;
-      oldToken.revokedAt = graceEnd; // future date — old still works until then
+      oldToken.revokedAt = graceEnd;
       await repo.save(oldToken);
 
       return { status: 201 as const, plaintext, saved: savedNew };
@@ -249,10 +260,8 @@ tokenRouter.post('/:id/rotate', isAuthenticated, async (req: Request, res: Respo
   }
 });
 
-// ── GET /api/tokens/verify — internal endpoint used by MCP server ───────
-// Authenticates via the PAT in the Authorization header itself.
+// ── GET /pat/tokens/verify ── internal endpoint used by MCP server
 tokenRouter.get('/verify', async (req: Request, res: Response) => {
-  // #swagger.tags = ['Tokens']
   try {
     const auth = req.headers.authorization || '';
     if (!auth.startsWith('Bearer ')) {
@@ -282,19 +291,21 @@ tokenRouter.get('/verify', async (req: Request, res: Response) => {
       return res.status(401).json({ error: 'expired' });
     }
 
-    // Constant-time double-check (defense in depth — DB lookup matched on hash already)
     if (!verifyTokenHash(plaintext, token.tokenHash)) {
       authAttempts.inc({ method: 'pat', status: 'failure' });
       return res.status(401).json({ error: 'invalid_token' });
     }
 
-    // Fire-and-forget update of last_used (doesn't block response)
     tokenRepository
       .update(token.id, { lastUsedAt: now, lastUsedIp: getClientIp(req) })
       .catch((err) => Logger.warn(`[PAT] Failed to update last_used for ${token.id}: ${err.message}`));
 
     authAttempts.inc({ method: 'pat', status: 'success' });
     return res.json({
+      // Wallet address is the canonical identifier downstream (MCP server
+      // stamps it into a ContextVar, backend uses it for NFT-derived
+      // permission checks). user_id is kept for callers still keyed by UUID.
+      auth_address: token.authAddress,
       user_id: token.userId,
       scopes: token.scopes,
       expires_at: token.expiresAt,

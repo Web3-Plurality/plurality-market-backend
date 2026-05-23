@@ -58,4 +58,14 @@ export class UserContext {
 
   @Column({ type: 'uuid', nullable: true })
   addedBy: string; // Tracks who actually added this context (for shared bucket editor-own-only enforcement)
+
+  // On-chain provenance fields
+  @Column({ type: 'varchar', nullable: true })
+  contentHash: string | null; // SHA-256 hash of original content
+
+  @Column({ type: 'boolean', default: false })
+  registeredOnChain: boolean; // Whether registered in ContextRegistry
+
+  @Column({ type: 'varchar', nullable: true })
+  registryTxHash: string | null; // Registration transaction hash
 }

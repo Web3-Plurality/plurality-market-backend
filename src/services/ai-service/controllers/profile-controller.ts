@@ -1,18 +1,16 @@
 import express, { Request, Response } from 'express';
 import dotenv from 'dotenv';
 import { isAuthenticated, isAuthenticatedNativeOrMcp } from '../../user-service/middlewares/auth-middleware';
-import { chargeMcpCall } from '../../subscription-service/middlewares/charge-mcp-middleware';
 import axios from 'axios';
 import { AppDataSource } from '../../../data-source';
 import { UserContext } from '../entity/user-context';
 import { UserAiProfile } from '../entity/user-ai-profile';
-import { ProfileAccess } from '../entity/profile-access';
-import { User } from '../../user-service/entity/user';
 import Logger from '../../../lib/logger';
 import { v2 as cloudinary } from 'cloudinary';
 import { userProfileOperations, smartProfileOperations } from '../../../lib/metrics';
 import { validate as isValidUUID } from 'uuid';
 import { resolveProfileAccess } from '../utils/permission';
+import { walletToBucketHashes } from '../../blockchain-service/utils/wallet-nfts';
 import { logActivity } from '../utils/activity';
 import { notifyShareMembers } from '../utils/notify';
 
@@ -20,7 +18,6 @@ dotenv.config();
 export const profileRouter = express.Router();
 const userContextRepository = AppDataSource.getRepository(UserContext);
 const userAiProfileRepository = AppDataSource.getRepository(UserAiProfile);
-const profileAccessRepository = AppDataSource.getRepository(ProfileAccess);
 
 cloudinary.config({
   cloud_name: process.env.CLOUDINARY_CLOUD_NAME,
@@ -77,145 +74,120 @@ export async function createProfile(userId: string, profileName: string, image: 
 }
 
 // CREATE: Add new AI profile
-profileRouter.post(
-  '/',
-  isAuthenticatedNativeOrMcp('mcp:tools'),
-  chargeMcpCall(1),
-  async (req: Request, res: Response) => {
-    // #swagger.tags = ['AI-Profile']
-    /* #swagger.security = [{
+profileRouter.post('/', isAuthenticatedNativeOrMcp('mcp:tools'), async (req: Request, res: Response) => {
+  // #swagger.tags = ['AI-Profile']
+  /* #swagger.security = [{
             "bearerAuth": []
     }] */
-    try {
-      const userId = req?.user?.id;
-      const { profileName, image } = req.body;
+  try {
+    const userId = req?.user?.id;
+    const { profileName, image } = req.body;
 
-      if (!userId) {
-        return res.status(401).json({ error: 'User not authenticated' });
-      }
-
-      // Validate profileName
-      if (profileName && typeof profileName !== 'string') {
-        return res.status(400).json({ error: 'Profile name must be a string' });
-      }
-
-      if (profileName && profileName.length > 200) {
-        return res.status(400).json({ error: 'Profile name is too long. Maximum length is 200 characters.' });
-      }
-
-      // Validate image
-      if (image && typeof image !== 'string') {
-        return res.status(400).json({ error: 'Image must be a string (base64 or URL)' });
-      }
-
-      if (image && image.length > 10000000) {
-        return res.status(400).json({ error: 'Image data is too large. Maximum size is 10MB.' });
-      }
-
-      const savedProfile = await createProfile(userId, profileName, image);
-
-      res.status(201).json(savedProfile);
-    } catch (error) {
-      Logger.error('Error creating AI profile:', error);
-      res.status(500).json({ error: 'Internal Server Error' });
+    if (!userId) {
+      return res.status(401).json({ error: 'User not authenticated' });
     }
-  },
-);
-// READ: Get all AI profiles for user (owned + shared)
-profileRouter.get(
-  '/',
-  isAuthenticatedNativeOrMcp('mcp:tools'),
-  chargeMcpCall(1),
-  async (req: Request, res: Response) => {
-    // #swagger.tags = ['AI-Profile']
-    /* #swagger.security = [{
+
+    // Validate profileName
+    if (profileName && typeof profileName !== 'string') {
+      return res.status(400).json({ error: 'Profile name must be a string' });
+    }
+
+    if (profileName && profileName.length > 200) {
+      return res.status(400).json({ error: 'Profile name is too long. Maximum length is 200 characters.' });
+    }
+
+    // Validate image
+    if (image && typeof image !== 'string') {
+      return res.status(400).json({ error: 'Image must be a string (base64 or URL)' });
+    }
+
+    if (image && image.length > 10000000) {
+      return res.status(400).json({ error: 'Image data is too large. Maximum size is 10MB.' });
+    }
+
+    const savedProfile = await createProfile(userId, profileName, image);
+
+    res.status(201).json(savedProfile);
+  } catch (error) {
+    const err = error as {
+      message?: string;
+      code?: string;
+      response?: { status?: number; data?: unknown };
+      config?: { url?: string };
+    };
+    Logger.error('Error creating AI profile:', {
+      message: err.message,
+      code: err.code,
+      url: err.config?.url,
+      responseStatus: err.response?.status,
+      responseData: err.response?.data,
+      stack: (error as Error)?.stack,
+    });
+    res.status(500).json({ error: 'Internal Server Error' });
+  }
+});
+// READ: list profiles the caller can access.
+//
+// Default (Studio's view): drafts only — `WHERE userId = ? AND isImmutable = false`.
+// Once a bucket is minted, it leaves Studio and lives in My Minted NFTs.
+//
+// `?includeMinted=true` (MCP / agent view): drafts + every minted bucket the
+// caller's wallet currently holds the NFT for. Lets the agent search across
+// memory you minted (and still own) or memory you bought on the marketplace,
+// without exposing buckets you sold.
+profileRouter.get('/', isAuthenticatedNativeOrMcp('mcp:tools'), async (req: Request, res: Response) => {
+  // #swagger.tags = ['AI-Profile']
+  /* #swagger.security = [{
             "bearerAuth": []
     }] */
-    try {
-      const userId = req?.user?.id;
+  try {
+    const userId = req?.user?.id;
+    const authAddress = req?.user?.authAddress;
+    const includeMinted = String(req.query.includeMinted || '').toLowerCase() === 'true';
 
-      // Fetch owned profiles
-      const ownedProfiles = await userAiProfileRepository.find({
-        where: { userId },
-        order: { createdAt: 'DESC' },
-      });
+    // Drafts owned by caller (the Studio view).
+    const drafts = await userAiProfileRepository.find({
+      where: { userId, isImmutable: false },
+      order: { createdAt: 'DESC' },
+    });
 
-      // Fetch context counts for owned profiles
-      const ownedWithCounts = await Promise.all(
-        ownedProfiles.map(async (profile) => {
-          const contextCount = await userContextRepository.count({
-            where: { userId, profileId: profile.id },
-          });
-
-          return {
-            ...profile,
-            contextCount,
-            isOwner: true,
-            role: 'owner' as const,
-            sharedBy: null,
-          };
-        }),
-      );
-
-      // Fetch shared profiles
-      const sharedBuckets = await profileAccessRepository
-        .createQueryBuilder('bs')
-        .innerJoin(UserAiProfile, 'p', 'p.id = bs.profileId')
-        .leftJoin(User, 'u', 'u.id = bs.ownerId')
-        .select([
-          'p.id AS id',
-          'p.userId AS "userId"',
-          'p.profileName AS "profileName"',
-          'p.image AS image',
-          'p.suggestedPrompts AS "suggestedPrompts"',
-          'p.published AS published',
-          'bs.isPinned AS "isPinned"',
-          'p.createdAt AS "createdAt"',
-          'bs.role AS role',
-          'bs.ownerId AS "ownerId"',
-          'u.email AS "ownerEmail"',
-          'u.name AS "ownerName"',
-          'u.authAddress AS "ownerWallet"',
-        ])
-        .where('bs.grantedToId = :userId', { userId })
-        .orderBy('bs.createdAt', 'DESC')
-        .getRawMany();
-
-      const sharedWithCounts = await Promise.all(
-        sharedBuckets.map(async (b) => {
-          const contextCount = await userContextRepository.count({
-            where: { profileId: b.id },
-          });
-
-          return {
-            id: b.id,
-            userId: b.userId,
-            profileName: b.profileName,
-            image: b.image,
-            suggestedPrompts: b.suggestedPrompts,
-            published: b.published,
-            isPinned: b.isPinned,
-            createdAt: b.createdAt,
-            contextCount,
-            isOwner: false,
-            role: b.role,
-            sharedBy: {
-              id: b.ownerId,
-              email: b.ownerEmail || null,
-              name: b.ownerName || null,
-              wallet: b.ownerWallet || null,
-            },
-          };
-        }),
-      );
-
-      res.status(200).json({ profiles: [...ownedWithCounts, ...sharedWithCounts] });
-    } catch (error) {
-      Logger.error('Error fetching AI profiles:', error);
-      res.status(500).json({ error: 'Internal Server Error' });
+    // Optional second slice: minted buckets the wallet currently holds an
+    // NFT for. Pulled in only when the caller explicitly asks (MCP agent),
+    // so Studio stays clean.
+    let mintedHeld: UserAiProfile[] = [];
+    if (includeMinted && authAddress) {
+      const held = await walletToBucketHashes(authAddress);
+      if (held.size > 0) {
+        mintedHeld = await userAiProfileRepository
+          .createQueryBuilder('p')
+          .where('p.isImmutable = true')
+          .andWhere('p.mintedTokenId IS NOT NULL')
+          .andWhere('LOWER(p.bucketHash) IN (:...hashes)', { hashes: Array.from(held) })
+          .orderBy('p.mintedAt', 'DESC')
+          .getMany();
+      }
     }
-  },
-);
+
+    const combined = [...drafts, ...mintedHeld];
+    const ownedWithCounts = await Promise.all(
+      combined.map(async (profile) => {
+        const contextCount = await userContextRepository.count({ where: { profileId: profile.id } });
+        return {
+          ...profile,
+          contextCount,
+          isOwner: true,
+          role: 'owner' as const,
+          sharedBy: null,
+        };
+      }),
+    );
+
+    res.status(200).json({ profiles: ownedWithCounts });
+  } catch (error) {
+    Logger.error('Error fetching AI profiles:', error);
+    res.status(500).json({ error: 'Internal Server Error' });
+  }
+});
 
 // READ: Get specific AI profile by ID (owner or shared)
 profileRouter.get('/:profileId', isAuthenticatedNativeOrMcp('mcp:tools'), async (req: Request, res: Response) => {
@@ -225,9 +197,10 @@ profileRouter.get('/:profileId', isAuthenticatedNativeOrMcp('mcp:tools'), async 
     }] */
   try {
     const userId = req?.user?.id;
+    const authAddress = req?.user?.authAddress;
     const { profileId } = req.params;
 
-    if (!userId) {
+    if (!userId || !authAddress) {
       return res.status(401).json({ error: 'User not authenticated' });
     }
 
@@ -236,7 +209,7 @@ profileRouter.get('/:profileId', isAuthenticatedNativeOrMcp('mcp:tools'), async 
       return res.status(400).json({ error: 'Invalid Profile ID format. Expected a valid UUID.' });
     }
 
-    const access = await resolveProfileAccess(userId, profileId);
+    const access = await resolveProfileAccess(authAddress, userId, profileId);
     if (!access.hasAccess) {
       return res.status(404).json({ error: 'AI profile not found' });
     }
@@ -283,6 +256,12 @@ profileRouter.put('/:profileId', isAuthenticated, async (req: Request, res: Resp
 
     if (!profile) {
       return res.status(404).json({ error: 'AI profile not found or you do not have permission to update it' });
+    }
+    if (profile.isImmutable) {
+      return res.status(403).json({
+        error: 'bucket_immutable',
+        message: 'Cannot rename a minted bucket — its presentation is frozen on chain.',
+      });
     }
 
     // Validate profileName
@@ -379,6 +358,14 @@ profileRouter.delete('/:profileId', isAuthenticated, async (req: Request, res: R
     if (!profile) {
       return res.status(404).json({ error: 'AI profile not found or you do not have permission to delete it' });
     }
+    if (profile.isImmutable) {
+      // Deleting a minted bucket would orphan the on-chain NFT (holder would
+      // lose access permanently with no recovery). Hard-block.
+      return res.status(403).json({
+        error: 'bucket_immutable',
+        message: 'Cannot delete a minted bucket — the on-chain NFT still references its contents.',
+      });
+    }
 
     // call AI service to delete from vector store as well
     try {
@@ -398,13 +385,11 @@ profileRouter.delete('/:profileId', isAuthenticated, async (req: Request, res: R
 
     // Use transaction to ensure all cascading deletes are atomic
     await AppDataSource.transaction(async (transactionalEntityManager) => {
-      // Delete associated shares
-      await transactionalEntityManager.delete(ProfileAccess, { profileId: profile.id });
-
       // Delete associated contexts
       await transactionalEntityManager.delete(UserContext, { userId, profileId: profile.id });
 
-      // Delete the profile
+      // Delete the profile. With the NFT-as-access-token model, the snapshot
+      // table is gone — no orphan cleanup needed here.
       await transactionalEntityManager.remove(UserAiProfile, profile);
     });
 
@@ -488,31 +473,15 @@ profileRouter.patch('/:profileId/pin', isAuthenticated, async (req: Request, res
       where: { id: profileId, userId },
     });
 
-    if (profile) {
-      // Owner: pin state lives on the profile
-      profile.isPinned = isPinned ? true : null;
-      const updatedProfile = await userAiProfileRepository.save(profile);
-      return res.status(200).json({
-        message: `Profile ${isPinned ? 'pinned' : 'unpinned'} successfully`,
-        profile: updatedProfile,
-      });
+    if (!profile) {
+      return res.status(404).json({ error: 'AI profile not found or you do not own it' });
     }
 
-    // Not owner — check if shared with user
-    const access = await AppDataSource.getRepository(ProfileAccess).findOne({
-      where: { profileId, grantedToId: userId },
-    });
-
-    if (!access) {
-      return res.status(404).json({ error: 'AI profile not found or you do not have permission to modify it' });
-    }
-
-    // Shared bucket: pin state lives on the access record
-    access.isPinned = isPinned ? true : null;
-    await AppDataSource.getRepository(ProfileAccess).save(access);
-
-    res.status(200).json({
+    profile.isPinned = isPinned ? true : null;
+    const updatedProfile = await userAiProfileRepository.save(profile);
+    return res.status(200).json({
       message: `Profile ${isPinned ? 'pinned' : 'unpinned'} successfully`,
+      profile: updatedProfile,
     });
   } catch (error) {
     Logger.error('Error updating profile pin status:', error);
