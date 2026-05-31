@@ -160,29 +160,3 @@ export function isAuthenticatedNativeOrMcp(...requiredScopes: string[]) {
     });
   };
 }
-
-// Optional authentication — allows both authenticated and unauthenticated.
-// Only accepts native JWTs (PATs are silently ignored — treated as anonymous).
-export const optionalAuthentication = async (req: Request, res: Response, next: NextFunction) => {
-  const token = extractToken(req);
-
-  if (!token) {
-    req.user = undefined;
-    return next();
-  }
-
-  if (isPatToken(token)) {
-    req.user = undefined;
-    return next();
-  }
-
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  jwt.verify(token, process.env.JWT_SECRET || '', (err: VerifyErrors | null, payload: any) => {
-    if (err || !payload?.authAddress || !payload?.id) {
-      req.user = undefined;
-    } else {
-      req.user = { id: payload.id, authAddress: payload.authAddress, authMethod: 'native' };
-    }
-    next();
-  });
-};

@@ -71,7 +71,8 @@ Wallet A = creator. Wallet B = buyer.
 
 - **Cache stale window**: wallet→NFTs cache TTL is 30s. After buy, both
   wallets get explicit invalidation, but if you test back-to-back from a
-  fresh terminal you might briefly hit the cache. Wait or `clearAllForTests()`.
+  fresh terminal you might briefly hit the cache. Wait 30s or restart the
+  backend to drop the in-process cache.
 - **`getBucketHashesByOwner` RPC**: every protected read on an immutable
   bucket now hits this view function on cache miss. If Sapphire testnet is
   slow, expect 200–800ms latency on cold reads. Cache amortizes it.

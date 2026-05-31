@@ -2,20 +2,24 @@ import express, { Request, Response } from 'express';
 import axios from 'axios';
 import Logger from '../../../lib/logger';
 import { isAuthenticatedMcp } from '../../user-service/middlewares/auth-middleware';
+import { resolveProfileAccess } from '../utils/permission';
 
 export const mcpRouter = express.Router();
 
 const AI_SERVICE_URL = process.env.AI_SERVICE_URL || 'http://localhost:8001';
 
 // POST /mcp/semantic-search — proxy semantic similarity search to AI service.
-// Single-owner: caller's userId is the only one searched. (Sharing was
-// removed in Phase 6 — no more cross-user fanout via profile_access.)
+// Per-profile path resolves access first, then forwards the original creator's
+// userId so NFT buyers (whose own userId doesn't match the S3 vectors) can
+// search buckets they hold. Mirrors the /ai/context/:contextId/content pattern.
 mcpRouter.post('/semantic-search', isAuthenticatedMcp('mcp:tools'), async (req: Request, res: Response) => {
   try {
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     const userId = (req as any).user?.id;
-    if (!userId) {
-      return res.status(401).json({ error: 'User ID not found in token' });
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const authAddress = (req as any).user?.authAddress;
+    if (!userId || !authAddress) {
+      return res.status(401).json({ error: 'User identity not found in token' });
     }
 
     const { query, profileIds, k = 5 } = req.body;
@@ -36,16 +40,29 @@ mcpRouter.post('/semantic-search', isAuthenticatedMcp('mcp:tools'), async (req: 
     const searchPromises: Promise<any[]>[] = [];
 
     if (profileIds && profileIds.length > 0) {
-      // Specific profiles requested — search each under the caller's userId.
+      // Resolve access per profileId. If granted, use access.ownerId — the
+      // original creator's userId — as the S3 filter, since vectors were
+      // written under that id. Unauthorized profiles are silently dropped.
       for (const profileId of profileIds) {
         searchPromises.push(
-          axios
-            .post(`${AI_SERVICE_URL}/rag/similarity-search`, { userId, profileId, query, k }, { headers: aiHeaders })
-            .then((response) => response.data.results || [])
-            .catch((err) => {
-              Logger.error(`[MCP] Semantic search failed for profile ${profileId}: ${err.message}`);
+          (async () => {
+            const access = await resolveProfileAccess(authAddress, userId, profileId);
+            if (!access.hasAccess) {
               return [];
-            }),
+            }
+            const effectiveUserId = access.ownerId || userId;
+            try {
+              const response = await axios.post(
+                `${AI_SERVICE_URL}/rag/similarity-search`,
+                { userId: effectiveUserId, profileId, query, k },
+                { headers: aiHeaders },
+              );
+              return response.data.results || [];
+            } catch (err) {
+              Logger.error(`[MCP] Semantic search failed for profile ${profileId}: ${(err as Error).message}`);
+              return [];
+            }
+          })(),
         );
       }
     } else {

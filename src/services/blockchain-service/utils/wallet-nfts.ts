@@ -103,23 +103,3 @@ export async function walletToBucketHashes(address: string): Promise<Set<string>
 export function invalidateWallet(address: string): void {
   cache.delete(normalizeAddress(address));
 }
-
-/**
- * Debug introspection. Used by /blockchain/whoami/nfts in dev only.
- */
-export function inspectCache(): Array<{ address: string; hashes: string[]; ageMs: number }> {
-  const now = Date.now();
-  return Array.from(cache.entries()).map(([address, entry]) => ({
-    address,
-    hashes: Array.from(entry.hashes),
-    ageMs: now - entry.fetchedAt,
-  }));
-}
-
-/**
- * Test/dev helper to wipe the cache entirely.
- */
-export function clearAllForTests(): void {
-  cache.clear();
-  inflight.clear();
-}

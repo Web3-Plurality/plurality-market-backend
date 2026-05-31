@@ -767,9 +767,7 @@ blockchainRouter.get('/my-nfts', isAuthenticated, async (req: Request, res: Resp
     // "cancel" (frozen) and "resume mint" (registered). Two batch queries:
     // total context count per profile, and how many of those are not yet
     // registered on-chain. Avoids N+1 over the pending set.
-    const pendingProfileIds = profiles
-      .filter((p) => !p.mintedTokenId)
-      .map((p) => p.id);
+    const pendingProfileIds = profiles.filter((p) => !p.mintedTokenId).map((p) => p.id);
     const totalCounts: Record<string, number> = {};
     const unregisteredCounts: Record<string, number> = {};
     if (pendingProfileIds.length > 0) {
@@ -803,8 +801,7 @@ blockchainRouter.get('/my-nfts', isAuthenticated, async (req: Request, res: Resp
         // would offer a Resume button that mintBucket() will reject.
         const total = totalCounts[p.id] ?? 0;
         const unregistered = unregisteredCounts[p.id] ?? 0;
-        const status: Status =
-          p.bucketHash && total > 0 && unregistered === 0 ? 'registered' : 'frozen';
+        const status: Status = p.bucketHash && total > 0 && unregistered === 0 ? 'registered' : 'frozen';
         nfts.push({ ...serializeBucketAsNft(p), mintStatus: status });
       } else if (p.bucketHash && held.has(p.bucketHash.toLowerCase())) {
         nfts.push({ ...serializeBucketAsNft(p), mintStatus: 'minted' });
