@@ -47,6 +47,26 @@ export function computeBucketHash(orderedContextHashes: string[]): string {
 }
 
 /**
+ * Pure: read the bucket's contexts in canonical order and compute the hash
+ * WITHOUT persisting it. Use when you need the hash for a read-only check
+ * (e.g. "is this already on-chain?") or when the caller will save in a
+ * single coordinated write. Works regardless of `isImmutable` — the hash
+ * is purely a function of content.
+ *
+ * Returns null when the bucket has no hashable contexts.
+ */
+export async function computeFromProfile(profileId: string): Promise<string | null> {
+  const contexts = await userContextRepository.find({
+    where: { profileId },
+    order: { createdAt: 'ASC', contextId: 'ASC' },
+    select: ['contextId', 'contentHash', 'createdAt'],
+  });
+  const hashes = contexts.map((c) => c.contentHash).filter((h): h is string => typeof h === 'string' && h.length > 0);
+  if (hashes.length === 0) return null;
+  return computeBucketHash(hashes);
+}
+
+/**
  * Fetch the bucket's contexts in canonical order, recompute the bucketHash,
  * and persist it on user_ai_profile.bucketHash. Returns the new hash (or
  * null if the bucket has no contexts yet).

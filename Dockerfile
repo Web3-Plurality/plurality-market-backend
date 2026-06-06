@@ -1,4 +1,4 @@
-FROM node:20
+FROM node:20-slim
 
 # Set up the working directory
 WORKDIR /app
@@ -6,45 +6,13 @@ WORKDIR /app
 # Copy package.json and package-lock.json files
 COPY package.json package-lock.json ./
 
-# Install system dependencies
+# Install minimal system dependencies. (Past versions of this image pulled in
+# ~30 headless-Chrome libs — libnss3, libgtk-3-0, libcups2, libxcomposite1,
+# etc. — left over from a Puppeteer integration that no longer exists in
+# the codebase. Those have been removed; only ca-certificates remains, for
+# outbound HTTPS to the RPC + AI service.)
 RUN apt-get update \
-    && apt-get install -y \
-        ca-certificates \
-        fonts-liberation \
-        libasound2 \
-        libatk-bridge2.0-0 \
-        libatk1.0-0 \
-        libc6 \
-        libcairo2 \
-        libcups2 \
-        libdbus-1-3 \
-        libexpat1 \
-        libfontconfig1 \
-        libgbm1 \
-        libgcc1 \
-        libglib2.0-0 \
-        libgtk-3-0 \
-        libnspr4 \
-        libnss3 \
-        libpango-1.0-0 \
-        libpangocairo-1.0-0 \
-        libstdc++6 \
-        libx11-6 \
-        libx11-xcb1 \
-        libxcb1 \
-        libxcomposite1 \
-        libxcursor1 \
-        libxdamage1 \
-        libxext6 \
-        libxfixes3 \
-        libxi6 \
-        libxrandr2 \
-        libxrender1 \
-        libxss1 \
-        libxtst6 \
-        lsb-release \
-        wget \
-        xdg-utils \
+    && apt-get install -y --no-install-recommends ca-certificates \
     && rm -rf /var/lib/apt/lists/*
 
 # Install Node.js dependencies (npm ci uses the committed lockfile for reproducible builds)
@@ -52,6 +20,11 @@ RUN npm ci
 
 # Copy the rest of the application code
 COPY . ./
+
+# The HTTP server reads PORT from .env / runtime env. Default to 5001 to match
+# the rest of the market stack (UI → 5001, MCP → 5001, AI service → 5001 webhook).
+ENV PORT=5001
+EXPOSE 5001
 
 # Set the command to run the application
 CMD ["sh", "-c", "npm run swagger && npm run prod"]

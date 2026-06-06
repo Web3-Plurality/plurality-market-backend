@@ -43,7 +43,6 @@ const userRegisterViaWallet = async (address: string) => {
     // both miss the existing-user check above and try to insert. If a
     // functional UNIQUE index exists on LOWER(authAddress), the second insert
     // throws — catch it, re-fetch, and use the row the other request created.
-    // (See scripts/dedupe-users.sql for the recommended index.)
     try {
       const newUser = userRepository.create({
         authAddress: normalizedAddress,

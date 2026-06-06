@@ -8,6 +8,11 @@
       },
       {
         "internalType": "address",
+        "name": "_admin",
+        "type": "address"
+      },
+      {
+        "internalType": "address",
         "name": "_feeRecipient",
         "type": "address"
       },
@@ -305,6 +310,12 @@
       },
       {
         "indexed": false,
+        "internalType": "uint96",
+        "name": "marketplaceFeeBpsAtList",
+        "type": "uint96"
+      },
+      {
+        "indexed": false,
         "internalType": "uint256",
         "name": "timestamp",
         "type": "uint256"
@@ -325,11 +336,42 @@
       {
         "indexed": true,
         "internalType": "address",
-        "name": "creator",
+        "name": "seller",
+        "type": "address"
+      },
+      {
+        "indexed": true,
+        "internalType": "address",
+        "name": "transferredTo",
         "type": "address"
       },
       {
         "indexed": false,
+        "internalType": "uint256",
+        "name": "timestamp",
+        "type": "uint256"
+      }
+    ],
+    "name": "BucketListingAutoCleared",
+    "type": "event"
+  },
+  {
+    "anonymous": false,
+    "inputs": [
+      {
+        "indexed": true,
+        "internalType": "uint256",
+        "name": "tokenId",
+        "type": "uint256"
+      },
+      {
+        "indexed": true,
+        "internalType": "address",
+        "name": "creator",
+        "type": "address"
+      },
+      {
+        "indexed": true,
         "internalType": "bytes32",
         "name": "bucketHash",
         "type": "bytes32"
@@ -505,6 +547,31 @@
     "inputs": [
       {
         "indexed": true,
+        "internalType": "uint256",
+        "name": "tokenCount",
+        "type": "uint256"
+      },
+      {
+        "indexed": true,
+        "internalType": "address",
+        "name": "newRecipient",
+        "type": "address"
+      },
+      {
+        "indexed": false,
+        "internalType": "uint96",
+        "name": "newBps",
+        "type": "uint96"
+      }
+    ],
+    "name": "PerTokenRoyaltyMigrated",
+    "type": "event"
+  },
+  {
+    "anonymous": false,
+    "inputs": [
+      {
+        "indexed": true,
         "internalType": "bytes32",
         "name": "role",
         "type": "bytes32"
@@ -573,6 +640,25 @@
       }
     ],
     "name": "RoleRevoked",
+    "type": "event"
+  },
+  {
+    "anonymous": false,
+    "inputs": [
+      {
+        "indexed": false,
+        "internalType": "uint96",
+        "name": "oldBps",
+        "type": "uint96"
+      },
+      {
+        "indexed": false,
+        "internalType": "uint96",
+        "name": "newBps",
+        "type": "uint96"
+      }
+    ],
+    "name": "RoyaltyBpsUpdated",
     "type": "event"
   },
   {
@@ -682,6 +768,25 @@
     "type": "event"
   },
   {
+    "anonymous": false,
+    "inputs": [
+      {
+        "indexed": true,
+        "internalType": "address",
+        "name": "account",
+        "type": "address"
+      },
+      {
+        "indexed": false,
+        "internalType": "uint256",
+        "name": "amount",
+        "type": "uint256"
+      }
+    ],
+    "name": "Withdrawn",
+    "type": "event"
+  },
+  {
     "inputs": [],
     "name": "DEFAULT_ADMIN_ROLE",
     "outputs": [
@@ -696,12 +801,51 @@
   },
   {
     "inputs": [],
-    "name": "MINTER_ROLE",
+    "name": "MAX_MARKETPLACE_FEE_BPS",
     "outputs": [
       {
-        "internalType": "bytes32",
+        "internalType": "uint96",
         "name": "",
-        "type": "bytes32"
+        "type": "uint96"
+      }
+    ],
+    "stateMutability": "view",
+    "type": "function"
+  },
+  {
+    "inputs": [],
+    "name": "MAX_ROYALTY_BPS",
+    "outputs": [
+      {
+        "internalType": "uint96",
+        "name": "",
+        "type": "uint96"
+      }
+    ],
+    "stateMutability": "view",
+    "type": "function"
+  },
+  {
+    "inputs": [],
+    "name": "MAX_ROYALTY_MIGRATION_BATCH",
+    "outputs": [
+      {
+        "internalType": "uint256",
+        "name": "",
+        "type": "uint256"
+      }
+    ],
+    "stateMutability": "view",
+    "type": "function"
+  },
+  {
+    "inputs": [],
+    "name": "VERSION",
+    "outputs": [
+      {
+        "internalType": "string",
+        "name": "",
+        "type": "string"
       }
     ],
     "stateMutability": "view",
@@ -750,6 +894,25 @@
         "internalType": "uint256[]",
         "name": "",
         "type": "uint256[]"
+      }
+    ],
+    "stateMutability": "view",
+    "type": "function"
+  },
+  {
+    "inputs": [
+      {
+        "internalType": "bytes32",
+        "name": "",
+        "type": "bytes32"
+      }
+    ],
+    "name": "bucketHashToTokenId",
+    "outputs": [
+      {
+        "internalType": "uint256",
+        "name": "",
+        "type": "uint256"
       }
     ],
     "stateMutability": "view",
@@ -816,6 +979,40 @@
   {
     "inputs": [
       {
+        "internalType": "address",
+        "name": "owner",
+        "type": "address"
+      },
+      {
+        "internalType": "uint256",
+        "name": "start",
+        "type": "uint256"
+      },
+      {
+        "internalType": "uint256",
+        "name": "limit",
+        "type": "uint256"
+      }
+    ],
+    "name": "getBucketHashesByOwnerPaginated",
+    "outputs": [
+      {
+        "internalType": "bytes32[]",
+        "name": "hashes",
+        "type": "bytes32[]"
+      },
+      {
+        "internalType": "uint256",
+        "name": "nextStart",
+        "type": "uint256"
+      }
+    ],
+    "stateMutability": "view",
+    "type": "function"
+  },
+  {
+    "inputs": [
+      {
         "internalType": "uint256",
         "name": "tokenId",
         "type": "uint256"
@@ -832,6 +1029,11 @@
         "internalType": "uint256",
         "name": "price",
         "type": "uint256"
+      },
+      {
+        "internalType": "uint96",
+        "name": "feeBps",
+        "type": "uint96"
       },
       {
         "internalType": "bool",
@@ -985,6 +1187,11 @@
         "type": "uint256"
       },
       {
+        "internalType": "uint96",
+        "name": "marketplaceFeeBpsAtList",
+        "type": "uint96"
+      },
+      {
         "internalType": "bool",
         "name": "active",
         "type": "bool"
@@ -1004,6 +1211,19 @@
       }
     ],
     "stateMutability": "view",
+    "type": "function"
+  },
+  {
+    "inputs": [
+      {
+        "internalType": "uint256[]",
+        "name": "tokenIds",
+        "type": "uint256[]"
+      }
+    ],
+    "name": "migratePerTokenRoyalty",
+    "outputs": [],
+    "stateMutability": "nonpayable",
     "type": "function"
   },
   {
@@ -1057,6 +1277,25 @@
     "type": "function"
   },
   {
+    "inputs": [
+      {
+        "internalType": "address",
+        "name": "owner",
+        "type": "address"
+      }
+    ],
+    "name": "ownedTokenCount",
+    "outputs": [
+      {
+        "internalType": "uint256",
+        "name": "",
+        "type": "uint256"
+      }
+    ],
+    "stateMutability": "view",
+    "type": "function"
+  },
+  {
     "inputs": [],
     "name": "pause",
     "outputs": [],
@@ -1071,6 +1310,25 @@
         "internalType": "bool",
         "name": "",
         "type": "bool"
+      }
+    ],
+    "stateMutability": "view",
+    "type": "function"
+  },
+  {
+    "inputs": [
+      {
+        "internalType": "address",
+        "name": "",
+        "type": "address"
+      }
+    ],
+    "name": "pendingWithdrawals",
+    "outputs": [
+      {
+        "internalType": "uint256",
+        "name": "",
+        "type": "uint256"
       }
     ],
     "stateMutability": "view",
@@ -1402,6 +1660,13 @@
       }
     ],
     "stateMutability": "view",
+    "type": "function"
+  },
+  {
+    "inputs": [],
+    "name": "withdraw",
+    "outputs": [],
+    "stateMutability": "nonpayable",
     "type": "function"
   }
 ]

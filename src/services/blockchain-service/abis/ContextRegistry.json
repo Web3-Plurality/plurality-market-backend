@@ -5,27 +5,6 @@
     "type": "constructor"
   },
   {
-    "inputs": [],
-    "name": "AccessControlBadConfirmation",
-    "type": "error"
-  },
-  {
-    "inputs": [
-      {
-        "internalType": "address",
-        "name": "account",
-        "type": "address"
-      },
-      {
-        "internalType": "bytes32",
-        "name": "neededRole",
-        "type": "bytes32"
-      }
-    ],
-    "name": "AccessControlUnauthorizedAccount",
-    "type": "error"
-  },
-  {
     "anonymous": false,
     "inputs": [
       {
@@ -66,7 +45,7 @@
         "type": "bytes32"
       },
       {
-        "indexed": false,
+        "indexed": true,
         "internalType": "bytes32",
         "name": "contentHash",
         "type": "bytes32"
@@ -104,84 +83,74 @@
     "inputs": [
       {
         "indexed": true,
-        "internalType": "bytes32",
-        "name": "role",
-        "type": "bytes32"
-      },
-      {
-        "indexed": true,
-        "internalType": "bytes32",
-        "name": "previousAdminRole",
-        "type": "bytes32"
-      },
-      {
-        "indexed": true,
-        "internalType": "bytes32",
-        "name": "newAdminRole",
-        "type": "bytes32"
-      }
-    ],
-    "name": "RoleAdminChanged",
-    "type": "event"
-  },
-  {
-    "anonymous": false,
-    "inputs": [
-      {
-        "indexed": true,
-        "internalType": "bytes32",
-        "name": "role",
-        "type": "bytes32"
-      },
-      {
-        "indexed": true,
         "internalType": "address",
-        "name": "account",
-        "type": "address"
-      },
-      {
-        "indexed": true,
-        "internalType": "address",
-        "name": "sender",
+        "name": "nftRegistry",
         "type": "address"
       }
     ],
-    "name": "RoleGranted",
-    "type": "event"
-  },
-  {
-    "anonymous": false,
-    "inputs": [
-      {
-        "indexed": true,
-        "internalType": "bytes32",
-        "name": "role",
-        "type": "bytes32"
-      },
-      {
-        "indexed": true,
-        "internalType": "address",
-        "name": "account",
-        "type": "address"
-      },
-      {
-        "indexed": true,
-        "internalType": "address",
-        "name": "sender",
-        "type": "address"
-      }
-    ],
-    "name": "RoleRevoked",
+    "name": "NftRegistryLinked",
     "type": "event"
   },
   {
     "inputs": [],
-    "name": "DEFAULT_ADMIN_ROLE",
+    "name": "MAX_BATCH_SIZE",
     "outputs": [
       {
-        "internalType": "bytes32",
+        "internalType": "uint256",
         "name": "",
-        "type": "bytes32"
+        "type": "uint256"
+      }
+    ],
+    "stateMutability": "view",
+    "type": "function"
+  },
+  {
+    "inputs": [],
+    "name": "MAX_CONTEXTS_PER_BUCKET",
+    "outputs": [
+      {
+        "internalType": "uint256",
+        "name": "",
+        "type": "uint256"
+      }
+    ],
+    "stateMutability": "view",
+    "type": "function"
+  },
+  {
+    "inputs": [],
+    "name": "MAX_METADATA_URI_LENGTH",
+    "outputs": [
+      {
+        "internalType": "uint256",
+        "name": "",
+        "type": "uint256"
+      }
+    ],
+    "stateMutability": "view",
+    "type": "function"
+  },
+  {
+    "inputs": [],
+    "name": "MAX_SOURCE_TYPE_LENGTH",
+    "outputs": [
+      {
+        "internalType": "uint256",
+        "name": "",
+        "type": "uint256"
+      }
+    ],
+    "stateMutability": "view",
+    "type": "function"
+  },
+  {
+    "inputs": [],
+    "name": "VERSION",
+    "outputs": [
+      {
+        "internalType": "string",
+        "name": "",
+        "type": "string"
       }
     ],
     "stateMutability": "view",
@@ -269,6 +238,19 @@
         "internalType": "string",
         "name": "sourceType",
         "type": "string"
+      }
+    ],
+    "stateMutability": "view",
+    "type": "function"
+  },
+  {
+    "inputs": [],
+    "name": "deployer",
+    "outputs": [
+      {
+        "internalType": "address",
+        "name": "",
+        "type": "address"
       }
     ],
     "stateMutability": "view",
@@ -420,67 +402,6 @@
     "inputs": [
       {
         "internalType": "bytes32",
-        "name": "role",
-        "type": "bytes32"
-      }
-    ],
-    "name": "getRoleAdmin",
-    "outputs": [
-      {
-        "internalType": "bytes32",
-        "name": "",
-        "type": "bytes32"
-      }
-    ],
-    "stateMutability": "view",
-    "type": "function"
-  },
-  {
-    "inputs": [
-      {
-        "internalType": "bytes32",
-        "name": "role",
-        "type": "bytes32"
-      },
-      {
-        "internalType": "address",
-        "name": "account",
-        "type": "address"
-      }
-    ],
-    "name": "grantRole",
-    "outputs": [],
-    "stateMutability": "nonpayable",
-    "type": "function"
-  },
-  {
-    "inputs": [
-      {
-        "internalType": "bytes32",
-        "name": "role",
-        "type": "bytes32"
-      },
-      {
-        "internalType": "address",
-        "name": "account",
-        "type": "address"
-      }
-    ],
-    "name": "hasRole",
-    "outputs": [
-      {
-        "internalType": "bool",
-        "name": "",
-        "type": "bool"
-      }
-    ],
-    "stateMutability": "view",
-    "type": "function"
-  },
-  {
-    "inputs": [
-      {
-        "internalType": "bytes32",
         "name": "",
         "type": "bytes32"
       }
@@ -491,6 +412,19 @@
         "internalType": "bytes16",
         "name": "",
         "type": "bytes16"
+      }
+    ],
+    "stateMutability": "view",
+    "type": "function"
+  },
+  {
+    "inputs": [],
+    "name": "nftRegistry",
+    "outputs": [
+      {
+        "internalType": "contract IBucketMintLookup",
+        "name": "",
+        "type": "address"
       }
     ],
     "stateMutability": "view",
@@ -532,56 +466,14 @@
   {
     "inputs": [
       {
-        "internalType": "bytes32",
-        "name": "role",
-        "type": "bytes32"
-      },
-      {
         "internalType": "address",
-        "name": "callerConfirmation",
+        "name": "nftAddress",
         "type": "address"
       }
     ],
-    "name": "renounceRole",
+    "name": "setNftRegistry",
     "outputs": [],
     "stateMutability": "nonpayable",
-    "type": "function"
-  },
-  {
-    "inputs": [
-      {
-        "internalType": "bytes32",
-        "name": "role",
-        "type": "bytes32"
-      },
-      {
-        "internalType": "address",
-        "name": "account",
-        "type": "address"
-      }
-    ],
-    "name": "revokeRole",
-    "outputs": [],
-    "stateMutability": "nonpayable",
-    "type": "function"
-  },
-  {
-    "inputs": [
-      {
-        "internalType": "bytes4",
-        "name": "interfaceId",
-        "type": "bytes4"
-      }
-    ],
-    "name": "supportsInterface",
-    "outputs": [
-      {
-        "internalType": "bool",
-        "name": "",
-        "type": "bool"
-      }
-    ],
-    "stateMutability": "view",
     "type": "function"
   },
   {

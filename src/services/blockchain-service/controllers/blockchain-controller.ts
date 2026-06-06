@@ -6,7 +6,7 @@ import { AppDataSource } from '../../../data-source';
 import { UserAiProfile } from '../../ai-service/entity/user-ai-profile';
 import { UserContext } from '../../ai-service/entity/user-context';
 import { resolveProfileAccess } from '../../ai-service/utils/permission';
-import { recomputeAndStore as recomputeBucketHash } from '../../ai-service/utils/bucket-hash';
+import { computeFromProfile as previewBucketHash } from '../../ai-service/utils/bucket-hash';
 import { invalidateWallet as invalidateWalletNftCache, walletToBucketHashes } from '../utils/wallet-nfts';
 import { logActivity } from '../../ai-service/utils/activity';
 import { getContractClient } from '../utils/contract-client';
@@ -324,23 +324,10 @@ blockchainRouter.post('/mint/:profileId/prepare-registration', isAuthenticated, 
       return res.status(409).json({ error: 'already_minted', tokenId: profile.mintedTokenId });
     }
 
-    // Has on-chain registration already landed? If yes, this endpoint is the
-    // wrong one — user should call /prepare-mint.
-    if (profile.bucketHash) {
-      const registrant = await client.getBucketRegistrant(profile.bucketHash);
-      if (registrant !== '0x0000000000000000000000000000000000000000') {
-        return res.status(409).json({
-          error: 'already_registered',
-          message: 'Contexts already on-chain. Proceed to /prepare-mint.',
-          bucketHash: profile.bucketHash,
-        });
-      }
-    }
-
-    // Recompute bucketHash from current contexts so we register the exact
-    // current state. Recompute is cheap and guarantees correctness even if
-    // the per-write tracker drifted.
-    const bucketHash = await recomputeBucketHash(profileId);
+    // Compute the bucketHash from current contexts WITHOUT persisting yet.
+    // We need the hash for the on-chain pre-check; persisting happens in a
+    // single coordinated save below so it can't race with isImmutable.
+    const bucketHash = await previewBucketHash(profileId);
     if (!bucketHash) {
       return res.status(400).json({
         error: 'empty_bucket',
@@ -348,18 +335,43 @@ blockchainRouter.post('/mint/:profileId/prepare-registration', isAuthenticated, 
       });
     }
 
-    // Stamp NFT presentation metadata. Done at prepare-registration (not
-    // prepare-mint) so all the NFT details are locked in alongside the
-    // content freeze.
+    // Has on-chain registration already landed for this content? Self-heals
+    // a stuck state where a prior prepare-registration call partially
+    // persisted (e.g. left isImmutable=true but lost the bucketHash) — we
+    // restore the DB row to a consistent prepared/registered state and
+    // tell the caller to advance to /prepare-mint.
+    const registrant = await client.getBucketRegistrant(bucketHash);
+    const callerWallet = (req?.user?.authAddress || '').toLowerCase();
+    if (registrant !== '0x0000000000000000000000000000000000000000') {
+      if (callerWallet && registrant !== callerWallet) {
+        return res.status(403).json({
+          error: 'bucket_claimed_by_another_wallet',
+          message: 'This bucketHash is registered to a different wallet.',
+          registrant,
+        });
+      }
+      // Heal the DB row if the previous prepare-registration call lost the
+      // hash or didn't flip immutable.
+      profile.bucketHash = bucketHash;
+      profile.isImmutable = true;
+      await userAiProfileRepository.save(profile);
+      return res.status(409).json({
+        error: 'already_registered',
+        message: 'Contexts already on-chain. Proceed to /prepare-mint.',
+        bucketHash,
+      });
+    }
+
+    // Stamp NFT presentation metadata + freeze the bucket + persist the
+    // bucketHash in a SINGLE save. Splitting these across multiple saves
+    // (or relying on recomputeAndStore's own internal save) created a
+    // stale-write race that could nuke the bucketHash after persistence.
     const meta = sanitizeMintMetadata(req.body);
     profile.nftTitle = meta.title || profile.profileName;
     profile.nftTagline = meta.tagline;
     profile.nftDescription = meta.description;
     profile.nftCoverImage = meta.coverImage || profile.image || null;
-
-    // Freeze the bucket. Phase 8's assertEditable now blocks every context
-    // write — the contents the user is about to register on-chain are
-    // exactly what stays on-chain.
+    profile.bucketHash = bucketHash;
     profile.isImmutable = true;
     await userAiProfileRepository.save(profile);
 
@@ -695,15 +707,59 @@ blockchainRouter.get('/mint/:profileId/status', isAuthenticated, async (req: Req
     if (!profile.isImmutable) {
       return res.status(200).json({ status: 'not_minted' });
     }
-    // Frozen → check whether tx1 (registration) already landed.
-    const allRegistered =
-      profile.bucketHash &&
+    // Frozen → check whether tx1 (registration) already landed. Source of
+    // truth is registeredOnChain flags on user_context (set by
+    // /confirm-registration). If the flags are still false but the chain
+    // actually has the registration, self-heal here so the UI can advance
+    // to "Resume mint" without a manual recovery step.
+    let bucketHash: string | null = profile.bucketHash || null;
+    let allRegistered =
+      !!bucketHash &&
       (await userContextRepository.count({
         where: { profileId, registeredOnChain: false },
       })) === 0;
+
+    if (!allRegistered) {
+      // Self-heal probe. Two stuck states we want to recover from:
+      //   (a) bucketHash IS persisted but registeredOnChain flags weren't
+      //       flipped (confirm-registration never landed).
+      //   (b) bucketHash is NULL because a prior prepare-registration save
+      //       raced and nuked it. The bucket is isImmutable=true here so
+      //       recomputing from contents gives the EXACT hash tx1 would have
+      //       used — content can't have changed.
+      // In both cases, a non-zero on-chain registrant proves tx1 landed.
+      try {
+        const client = getContractClient();
+        if (client.isConfigured()) {
+          if (!bucketHash) {
+            bucketHash = await previewBucketHash(profileId);
+          }
+          if (bucketHash) {
+            const registrant = await client.getBucketRegistrant(bucketHash);
+            if (registrant !== '0x0000000000000000000000000000000000000000') {
+              // Persist a missing bucketHash so prepare-mint / confirm-mint
+              // can use it without re-probing.
+              if (!profile.bucketHash) {
+                profile.bucketHash = bucketHash;
+                await userAiProfileRepository.save(profile);
+              }
+              // Mark every still-unmarked context as on-chain.
+              await userContextRepository.update(
+                { profileId, registeredOnChain: false },
+                { registeredOnChain: true },
+              );
+              allRegistered = true;
+            }
+          }
+        }
+      } catch (err) {
+        Logger.warn(`[status] self-heal probe failed for ${profileId}:`, err);
+      }
+    }
+
     return res.status(200).json({
       status: allRegistered ? 'registered' : 'frozen',
-      bucketHash: profile.bucketHash,
+      bucketHash,
     });
   } catch (error: any) {
     Logger.error('Failed to get mint status:', error);
@@ -764,22 +820,15 @@ blockchainRouter.get('/my-nfts', isAuthenticated, async (req: Request, res: Resp
     const held = authAddress ? await walletToBucketHashes(authAddress) : new Set<string>();
 
     // Pending profiles need a 4-state breakdown so the UI can branch between
-    // "cancel" (frozen) and "resume mint" (registered). Two batch queries:
-    // total context count per profile, and how many of those are not yet
-    // registered on-chain. Avoids N+1 over the pending set.
+    // "cancel" (frozen) and "resume mint" (registered). One batch query for
+    // total context counts (used for both the frozen/registered split AND
+    // the card-front "N contexts" badge for every NFT in the response), and
+    // a narrower one for the unregistered subset. Avoids N+1 across the set.
+    const allProfileIds = profiles.map((p) => p.id);
     const pendingProfileIds = profiles.filter((p) => !p.mintedTokenId).map((p) => p.id);
-    const totalCounts: Record<string, number> = {};
+    const totalCounts = await countContextsByProfile(allProfileIds);
     const unregisteredCounts: Record<string, number> = {};
     if (pendingProfileIds.length > 0) {
-      const totals = await userContextRepository
-        .createQueryBuilder('c')
-        .select('c.profileId', 'profileId')
-        .addSelect('COUNT(*)', 'count')
-        .where('c.profileId IN (:...ids)', { ids: pendingProfileIds })
-        .groupBy('c.profileId')
-        .getRawMany<{ profileId: string; count: string }>();
-      for (const r of totals) totalCounts[r.profileId] = parseInt(r.count, 10);
-
       const unreg = await userContextRepository
         .createQueryBuilder('c')
         .select('c.profileId', 'profileId')
@@ -793,6 +842,14 @@ blockchainRouter.get('/my-nfts', isAuthenticated, async (req: Request, res: Resp
 
     type Status = 'frozen' | 'registered' | 'minted';
     const nfts: Array<ReturnType<typeof serializeBucketAsNft> & { mintStatus: Status }> = [];
+
+    // Resolve the contract client once. Used for self-heal probes on stuck
+    // pending mints: if tx1 actually landed on chain but DB lost track (lost
+    // bucketHash, registeredOnChain flags never flipped), we want the UI to
+    // show "Resume mint" not "Cancel".
+    const client = getContractClient();
+    const clientReady = client.isConfigured();
+
     for (const p of profiles) {
       if (!p.mintedTokenId) {
         // "registered" requires bucketHash AND at least one context, ALL of
@@ -801,10 +858,41 @@ blockchainRouter.get('/my-nfts', isAuthenticated, async (req: Request, res: Resp
         // would offer a Resume button that mintBucket() will reject.
         const total = totalCounts[p.id] ?? 0;
         const unregistered = unregisteredCounts[p.id] ?? 0;
-        const status: Status = p.bucketHash && total > 0 && unregistered === 0 ? 'registered' : 'frozen';
-        nfts.push({ ...serializeBucketAsNft(p), mintStatus: status });
+        let status: Status =
+          p.bucketHash && total > 0 && unregistered === 0 ? 'registered' : 'frozen';
+
+        // Self-heal probe: if we're about to call this 'frozen' but the chain
+        // actually has the registration, fix DB + report 'registered'. Covers
+        // two failure modes:
+        //   (a) bucketHash persisted, registeredOnChain flags weren't flipped
+        //   (b) bucketHash got overwritten to null by a stale-save race; the
+        //       hash is deterministic from content (which can't change while
+        //       isImmutable=true), so we can recompute it safely
+        if (status === 'frozen' && total > 0 && clientReady) {
+          try {
+            let hash = p.bucketHash || (await previewBucketHash(p.id));
+            if (hash) {
+              const registrant = await client.getBucketRegistrant(hash);
+              if (registrant !== '0x0000000000000000000000000000000000000000') {
+                if (!p.bucketHash) {
+                  p.bucketHash = hash;
+                  await userAiProfileRepository.save(p);
+                }
+                await userContextRepository.update(
+                  { profileId: p.id, registeredOnChain: false },
+                  { registeredOnChain: true },
+                );
+                status = 'registered';
+              }
+            }
+          } catch (err) {
+            Logger.warn(`[my-nfts] self-heal probe failed for ${p.id}:`, err);
+          }
+        }
+
+        nfts.push({ ...serializeBucketAsNft(p, totalCounts[p.id] ?? 0), mintStatus: status });
       } else if (p.bucketHash && held.has(p.bucketHash.toLowerCase())) {
-        nfts.push({ ...serializeBucketAsNft(p), mintStatus: 'minted' });
+        nfts.push({ ...serializeBucketAsNft(p, totalCounts[p.id] ?? 0), mintStatus: 'minted' });
       }
       // Sold → skipped.
     }
@@ -836,7 +924,8 @@ blockchainRouter.get('/acquired-nfts', isAuthenticated, async (req: Request, res
       .orderBy('p.mintedAt', 'DESC')
       .getMany();
 
-    return res.status(200).json({ nfts: profiles.map(serializeBucketAsNft) });
+    const counts = await countContextsByProfile(profiles.map((p) => p.id));
+    return res.status(200).json({ nfts: profiles.map((p) => serializeBucketAsNft(p, counts[p.id] ?? 0)) });
   } catch (error: any) {
     Logger.error('Failed to get acquired NFTs:', error);
     return res.status(500).json({ error: 'Failed to get NFTs' });
@@ -846,7 +935,7 @@ blockchainRouter.get('/acquired-nfts', isAuthenticated, async (req: Request, res
 // Public-facing JSON for an immutable bucket. Never includes raw content —
 // only counts and metadata. Matches the legacy snapshot shape just enough
 // that the Studio UI's NFT cards keep rendering during the rewrite.
-function serializeBucketAsNft(p: UserAiProfile) {
+function serializeBucketAsNft(p: UserAiProfile, contextCount = 0) {
   return {
     id: p.id,
     tokenId: p.mintedTokenId,
@@ -865,7 +954,28 @@ function serializeBucketAsNft(p: UserAiProfile) {
     listingPrice: p.listingPrice,
     mintedAt: p.mintedAt?.toISOString(),
     createdAt: p.createdAt.toISOString(),
+    // Card front shows "N contexts". Counted once per request by the calling
+    // endpoint and threaded through here — N+1 over individual SELECT counts
+    // would scale badly when a wallet holds many NFTs.
+    contextCount,
   };
+}
+
+// Batch-count contexts per profile id. Used by every endpoint that emits
+// `serializeBucketAsNft(...)` so the response carries a non-zero context
+// total on the card-front display.
+async function countContextsByProfile(profileIds: string[]): Promise<Record<string, number>> {
+  if (profileIds.length === 0) return {};
+  const rows = await userContextRepository
+    .createQueryBuilder('c')
+    .select('c.profileId', 'profileId')
+    .addSelect('COUNT(*)', 'count')
+    .where('c.profileId IN (:...ids)', { ids: profileIds })
+    .groupBy('c.profileId')
+    .getRawMany<{ profileId: string; count: string }>();
+  const out: Record<string, number> = {};
+  for (const r of rows) out[r.profileId] = parseInt(r.count, 10);
+  return out;
 }
 
 // Helper: find the UserAiProfile that owns a given on-chain tokenId.
@@ -1085,7 +1195,8 @@ blockchainRouter.get('/marketplace/listings', async (req: Request, res: Response
       where: { listingActive: true, isImmutable: true },
       order: { mintedAt: 'DESC' },
     });
-    return res.status(200).json({ listings: profiles.map(serializeBucketAsNft) });
+    const counts = await countContextsByProfile(profiles.map((p) => p.id));
+    return res.status(200).json({ listings: profiles.map((p) => serializeBucketAsNft(p, counts[p.id] ?? 0)) });
   } catch (error: any) {
     Logger.error('Failed to get marketplace listings:', error);
     return res.status(500).json({ error: 'Failed to get listings' });
