@@ -55,6 +55,7 @@ export class ContractClient {
   async getContractInfo(): Promise<{
     nftAddress: string;
     registryAddress: string;
+    reputationAddress: string;
     chainId: number;
     mintFee: string;
   }> {
@@ -63,6 +64,10 @@ export class ContractClient {
     return {
       nftAddress: process.env.MEMORY_NFT_CONTRACT_ADDRESS || '',
       registryAddress: process.env.CONTEXT_REGISTRY_ADDRESS || '',
+      // ERC-8004 ReputationRegistry — used by the marketplace review UI. The
+      // address is already configured server-side; surface it so the frontend
+      // can read/write feedback directly on-chain (no backend proxy needed).
+      reputationAddress: process.env.REPUTATION_REGISTRY_ADDRESS || '',
       chainId: Number(network.chainId),
       mintFee: fee,
     };
@@ -81,6 +86,7 @@ export class ContractClient {
   prepareMintData(
     bucketHash: string,
     metadataURI: string,
+    copies: number,
   ): {
     to: string;
     data: string;
@@ -89,14 +95,29 @@ export class ContractClient {
     if (!bucketHash.startsWith('0x') || bucketHash.length !== 66) {
       throw new Error(`prepareMintData: bucketHash must be 0x-prefixed 64-hex, got "${bucketHash}"`);
     }
+    if (!Number.isInteger(copies) || copies < 1 || copies > 10) {
+      throw new Error(`prepareMintData: copies must be an integer in [1, 10], got "${copies}"`);
+    }
     const iface = new ethers.Interface(PluralityMemoryNFTABI as any);
-    const data = iface.encodeFunctionData('mintBucket', [bucketHash, metadataURI]);
+    const data = iface.encodeFunctionData('mintBucket', [bucketHash, metadataURI, copies]);
 
     return {
       to: process.env.MEMORY_NFT_CONTRACT_ADDRESS || '',
       data,
       value: '0', // Frontend will read mintFee and set value
     };
+  }
+
+  /**
+   * Batch-read a wallet's balance across several tokenIds in ONE call
+   * (ERC-1155 balanceOfBatch). Returns counts in the same order as `tokenIds`.
+   * Used to show "copies you own" per NFT on the My-Minted / Acquired cards.
+   */
+  async balancesOf(wallet: string, tokenIds: number[]): Promise<number[]> {
+    if (tokenIds.length === 0) return [];
+    const accounts = tokenIds.map(() => wallet);
+    const res: bigint[] = await this.memoryNFT.balanceOfBatch(accounts, tokenIds);
+    return res.map((b) => Number(b));
   }
 
   /**
@@ -245,7 +266,9 @@ export class ContractClient {
       from?: string;
       to?: string;
       price?: string;
+      amount?: number;
       bucketHash?: string;
+      copies?: number;
       txHash: string;
       timestamp: string;
       blockNumber: number;
@@ -256,7 +279,9 @@ export class ContractClient {
       from?: string;
       to?: string;
       price?: string;
+      amount?: number;
       bucketHash?: string;
+      copies?: number;
       txHash: string;
       timestamp: string;
       blockNumber: number;
@@ -286,6 +311,7 @@ export class ContractClient {
                 event: 'Minted',
                 to: parsed.args.creator,
                 bucketHash: String(parsed.args.bucketHash).toLowerCase(),
+                copies: parsed.args.copies !== undefined ? Number(parsed.args.copies) : undefined,
                 txHash,
                 timestamp,
                 blockNumber: receipt.blockNumber,
@@ -295,7 +321,8 @@ export class ContractClient {
               events.push({
                 event: 'Listed',
                 from: parsed.args.seller,
-                price: parsed.args.price.toString(),
+                price: parsed.args.price.toString(), // per-unit
+                amount: parsed.args.amount !== undefined ? Number(parsed.args.amount) : undefined,
                 txHash,
                 timestamp,
                 blockNumber: receipt.blockNumber,
@@ -315,7 +342,8 @@ export class ContractClient {
                 event: 'Sold',
                 from: parsed.args.seller,
                 to: parsed.args.buyer,
-                price: parsed.args.price.toString(),
+                price: parsed.args.unitPrice.toString(), // per-unit (renamed from `price`)
+                amount: parsed.args.amount !== undefined ? Number(parsed.args.amount) : undefined,
                 txHash,
                 timestamp,
                 blockNumber: receipt.blockNumber,

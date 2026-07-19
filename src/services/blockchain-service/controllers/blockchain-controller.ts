@@ -3,8 +3,10 @@ import axios from 'axios';
 import { v2 as cloudinary } from 'cloudinary';
 import { isAuthenticated } from '../../user-service/middlewares/auth-middleware';
 import { AppDataSource } from '../../../data-source';
+import { In } from 'typeorm';
 import { UserAiProfile } from '../../ai-service/entity/user-ai-profile';
 import { UserContext } from '../../ai-service/entity/user-context';
+import { NftListing } from '../entity/nft-listing';
 import { resolveProfileAccess } from '../../ai-service/utils/permission';
 import { computeFromProfile as previewBucketHash } from '../../ai-service/utils/bucket-hash';
 import { invalidateWallet as invalidateWalletNftCache, walletToBucketHashes } from '../utils/wallet-nfts';
@@ -46,6 +48,26 @@ function sanitizeMintMetadata(body: any): {
 export const blockchainRouter = express.Router();
 const userAiProfileRepository = AppDataSource.getRepository(UserAiProfile);
 const userContextRepository = AppDataSource.getRepository(UserContext);
+const nftListingRepository = AppDataSource.getRepository(NftListing);
+
+// Recompute the bucket-level listing summary on user_ai_profile from the
+// authoritative per-(token,seller) rows in nft_listing: listingActive = any
+// active listing exists; listingPrice = the current floor (min per-unit price).
+// Keeps serializeBucketAsNft (and any legacy consumer) truthful without a join.
+async function refreshListingSummary(profile: UserAiProfile, tokenId: number): Promise<void> {
+  const active = await nftListingRepository.find({ where: { tokenId, active: true } });
+  if (active.length === 0) {
+    profile.listingActive = false;
+    profile.listingPrice = null;
+  } else {
+    profile.listingActive = true;
+    profile.listingPrice = active
+      .map((l) => BigInt(l.price))
+      .reduce((min, p) => (p < min ? p : min))
+      .toString();
+  }
+  await userAiProfileRepository.save(profile);
+}
 
 // Build a self-hosted metadata URI (no IPFS/Pinata needed)
 const API_BASE_URL = process.env.API_BASE_URL || 'https://api.plurality.network';
@@ -548,14 +570,22 @@ blockchainRouter.post('/mint/:profileId/prepare-mint', isAuthenticated, async (r
       });
     }
 
+    // Edition size (number of copies) the creator wants to mint, 1..MAX_COPIES.
+    // Defaults to 1 for backward-compatible callers.
+    const copies = Number((req.body as { copies?: number })?.copies ?? 1);
+    if (!Number.isInteger(copies) || copies < 1 || copies > 10) {
+      return res.status(400).json({ error: 'copies must be an integer in [1, 10]' });
+    }
+
     const metadataURI = buildBucketMetadataURI(profileId);
-    const callData = client.prepareMintData(profile.bucketHash, metadataURI);
+    const callData = client.prepareMintData(profile.bucketHash, metadataURI, copies);
     const mintFee = await client.getMintFee();
 
     return res.status(200).json({
       profileId,
       bucketHash: profile.bucketHash,
       metadataURI,
+      copies,
       contractAddress: callData.to,
       callData: callData.data,
       mintFee,
@@ -619,6 +649,9 @@ blockchainRouter.post('/mint/:profileId/confirm-mint', isAuthenticated, async (r
     profile.mintedTokenId = tokenId;
     profile.mintedAt = new Date();
     profile.mintTxHash = txHash;
+    // Edition size straight from the on-chain event (authoritative). Older
+    // single-copy mints (or a missing field) fall back to 1.
+    profile.editionSize = minted.copies && minted.copies >= 1 ? minted.copies : 1;
     profile.transactionHashes = [...(profile.transactionHashes || []), txHash];
     await userAiProfileRepository.save(profile);
 
@@ -744,10 +777,7 @@ blockchainRouter.get('/mint/:profileId/status', isAuthenticated, async (req: Req
                 await userAiProfileRepository.save(profile);
               }
               // Mark every still-unmarked context as on-chain.
-              await userContextRepository.update(
-                { profileId, registeredOnChain: false },
-                { registeredOnChain: true },
-              );
+              await userContextRepository.update({ profileId, registeredOnChain: false }, { registeredOnChain: true });
               allRegistered = true;
             }
           }
@@ -858,8 +888,7 @@ blockchainRouter.get('/my-nfts', isAuthenticated, async (req: Request, res: Resp
         // would offer a Resume button that mintBucket() will reject.
         const total = totalCounts[p.id] ?? 0;
         const unregistered = unregisteredCounts[p.id] ?? 0;
-        let status: Status =
-          p.bucketHash && total > 0 && unregistered === 0 ? 'registered' : 'frozen';
+        let status: Status = p.bucketHash && total > 0 && unregistered === 0 ? 'registered' : 'frozen';
 
         // Self-heal probe: if we're about to call this 'frozen' but the chain
         // actually has the registration, fix DB + report 'registered'. Covers
@@ -870,7 +899,7 @@ blockchainRouter.get('/my-nfts', isAuthenticated, async (req: Request, res: Resp
         //       isImmutable=true), so we can recompute it safely
         if (status === 'frozen' && total > 0 && clientReady) {
           try {
-            let hash = p.bucketHash || (await previewBucketHash(p.id));
+            const hash = p.bucketHash || (await previewBucketHash(p.id));
             if (hash) {
               const registrant = await client.getBucketRegistrant(hash);
               if (registrant !== '0x0000000000000000000000000000000000000000') {
@@ -896,7 +925,7 @@ blockchainRouter.get('/my-nfts', isAuthenticated, async (req: Request, res: Resp
       }
       // Sold → skipped.
     }
-    return res.status(200).json({ nfts });
+    return res.status(200).json({ nfts: await attachCallerListings(nfts, authAddress) });
   } catch (error: any) {
     Logger.error('Failed to get my NFTs:', error);
     return res.status(500).json({ error: 'Failed to get NFTs' });
@@ -925,12 +954,69 @@ blockchainRouter.get('/acquired-nfts', isAuthenticated, async (req: Request, res
       .getMany();
 
     const counts = await countContextsByProfile(profiles.map((p) => p.id));
-    return res.status(200).json({ nfts: profiles.map((p) => serializeBucketAsNft(p, counts[p.id] ?? 0)) });
+    const serialized = profiles.map((p) => serializeBucketAsNft(p, counts[p.id] ?? 0));
+    return res.status(200).json({ nfts: await attachCallerListings(serialized, authAddress) });
   } catch (error: any) {
     Logger.error('Failed to get acquired NFTs:', error);
     return res.status(500).json({ error: 'Failed to get NFTs' });
   }
 });
+
+// Attach the CALLER's own active listing to each serialized NFT. The bucket
+// listingActive means "SOMEONE has a listing"; My-Minted / Acquired need "do
+// *I* have a listing" to show List vs Delist. Sourced from nft_listing keyed
+// by (tokenId, seller=caller). Without this, a buyer sees the seller's residual
+// bucket-level listing state as if it were their own.
+async function attachCallerListings<T extends { tokenId: number | null }>(
+  nfts: T[],
+  callerWallet: string | undefined,
+): Promise<
+  (T & {
+    myListingActive: boolean;
+    myListingPrice: string | null;
+    myListingAmount: number;
+    copiesOwned: number;
+  })[]
+> {
+  const out = nfts.map((n) => ({
+    ...n,
+    myListingActive: false,
+    myListingPrice: null as string | null,
+    myListingAmount: 0,
+    copiesOwned: 0,
+  }));
+  if (!callerWallet) return out;
+  const seller = callerWallet.toLowerCase();
+  const tokenIds = out.map((n) => n.tokenId).filter((t): t is number => typeof t === 'number');
+  if (tokenIds.length === 0) return out;
+
+  const rows = await nftListingRepository.find({ where: { seller, tokenId: In(tokenIds), active: true } });
+  const byToken = new Map(rows.map((r) => [r.tokenId, r] as const));
+
+  // Copies owned per token — one batched ERC-1155 balanceOfBatch call.
+  const balByToken = new Map<number, number>();
+  try {
+    const client = getContractClient();
+    if (client.isConfigured()) {
+      const balances = await client.balancesOf(callerWallet, tokenIds);
+      tokenIds.forEach((t, i) => balByToken.set(t, balances[i] ?? 0));
+    }
+  } catch (err) {
+    Logger.warn('[attachCallerListings] balanceOfBatch failed:', err);
+  }
+
+  for (const n of out) {
+    if (typeof n.tokenId !== 'number') continue;
+    const r = byToken.get(n.tokenId);
+    if (r) {
+      n.myListingActive = true;
+      n.myListingPrice = r.price;
+      n.myListingAmount = r.amount;
+    }
+    n.copiesOwned = balByToken.get(n.tokenId) ?? 0;
+  }
+  return out;
+}
 
 // Public-facing JSON for an immutable bucket. Never includes raw content —
 // only counts and metadata. Matches the legacy snapshot shape just enough
@@ -950,6 +1036,7 @@ function serializeBucketAsNft(p: UserAiProfile, contextCount = 0) {
     metadataURI: buildBucketMetadataURI(p.id),
     mintTxHash: p.mintTxHash,
     chain: 'oasis-sapphire-testnet',
+    editionSize: p.editionSize ?? 1,
     listingActive: p.listingActive,
     listingPrice: p.listingPrice,
     mintedAt: p.mintedAt?.toISOString(),
@@ -997,21 +1084,18 @@ blockchainRouter.post('/list/:tokenId', isAuthenticated, async (req: Request, re
   try {
     const authAddress = req?.user?.authAddress;
     const { tokenId } = req.params;
-    const { price, txHash } = req.body;
+    const { txHash } = req.body;
 
     if (!authAddress) return res.status(400).json({ error: 'Wallet address required' });
     const tid = parseInt(tokenId);
-    if (typeof price !== 'string' || !/^\d+$/.test(price)) {
-      return res.status(400).json({ error: 'price must be a wei string' });
-    }
 
+    // Auth: the on-chain Listed event must credit the caller as the seller.
     const verifyError = await verifyTxEvent({
       txHash,
       tokenId: tid,
       expectEvent: 'Listed',
       expectActor: authAddress,
       actorRole: 'from',
-      expectPrice: price,
     });
     if (verifyError) {
       Logger.warn(`[LIST] reject for ${authAddress} on #${tid}: ${verifyError}`);
@@ -1021,12 +1105,31 @@ blockchainRouter.post('/list/:tokenId', isAuthenticated, async (req: Request, re
     const profile = await findProfileByTokenId(tid);
     if (!profile) return res.status(404).json({ error: 'Bucket for token not found' });
 
-    profile.listingActive = true;
-    profile.listingPrice = price;
-    profile.transactionHashes = [...(profile.transactionHashes || []), txHash];
-    await userAiProfileRepository.save(profile);
+    // Derive per-unit price + amount from the verified event (never trust body).
+    const client = getContractClient();
+    const listed = (await client.getEventsFromTx(txHash as string, tid)).find((e) => e.event === 'Listed');
+    const price = listed?.price ?? '0';
+    const amount = listed?.amount ?? 0;
+    if (amount < 1 || !/^\d+$/.test(price) || price === '0') {
+      return res.status(400).json({ error: 'Listed event missing a valid price/amount' });
+    }
+    const seller = authAddress.toLowerCase();
 
-    return res.status(200).json({ success: true, tokenId: tid, price });
+    // Upsert the (tokenId, seller) listing — one active row per seller per token.
+    let listing = await nftListingRepository.findOne({ where: { tokenId: tid, seller } });
+    if (!listing) {
+      listing = nftListingRepository.create({ tokenId: tid, profileId: profile.id, seller });
+    }
+    listing.profileId = profile.id;
+    listing.price = price;
+    listing.amount = amount;
+    listing.active = true;
+    await nftListingRepository.save(listing);
+
+    profile.transactionHashes = [...(profile.transactionHashes || []), txHash];
+    await refreshListingSummary(profile, tid);
+
+    return res.status(200).json({ success: true, tokenId: tid, price, amount });
   } catch (error: any) {
     Logger.error('Failed to record listing:', error);
     return res.status(500).json({ error: 'Failed to record listing' });
@@ -1061,10 +1164,17 @@ blockchainRouter.post('/delist/:tokenId', isAuthenticated, async (req: Request, 
     const profile = await findProfileByTokenId(tid);
     if (!profile) return res.status(404).json({ error: 'Bucket for token not found' });
 
-    profile.listingActive = false;
-    profile.listingPrice = null;
+    // Deactivate this seller's listing for the token.
+    const seller = authAddress.toLowerCase();
+    const listing = await nftListingRepository.findOne({ where: { tokenId: tid, seller } });
+    if (listing) {
+      listing.active = false;
+      listing.amount = 0;
+      await nftListingRepository.save(listing);
+    }
+
     profile.transactionHashes = [...(profile.transactionHashes || []), txHash];
-    await userAiProfileRepository.save(profile);
+    await refreshListingSummary(profile, tid);
 
     return res.status(200).json({ success: true, tokenId: tid });
   } catch (error: any) {
@@ -1108,16 +1218,25 @@ blockchainRouter.post('/buy/:tokenId', isAuthenticated, async (req: Request, res
     const profile = await findProfileByTokenId(tid);
     if (!profile) return res.status(404).json({ error: 'Bucket for token not found' });
 
-    // Find the seller address from the Sold event to invalidate their cache too.
+    // Derive seller + amount from the verified Sold event (never trust body).
     const client = getContractClient();
-    const events = await client.getEventsFromTx(txHash, tid);
+    const events = await client.getEventsFromTx(txHash as string, tid);
     const sold = events.find((e) => e.event === 'Sold');
-    const sellerWallet = sold?.from;
+    const sellerWallet = (sold?.from || '').toLowerCase();
+    const boughtAmount = sold?.amount ?? 0;
 
-    profile.listingActive = false;
-    profile.listingPrice = null;
+    // Reduce the seller's listing by the units sold; deactivate when it hits 0.
+    if (sellerWallet && boughtAmount > 0) {
+      const listing = await nftListingRepository.findOne({ where: { tokenId: tid, seller: sellerWallet } });
+      if (listing) {
+        listing.amount = Math.max(0, listing.amount - boughtAmount);
+        if (listing.amount === 0) listing.active = false;
+        await nftListingRepository.save(listing);
+      }
+    }
+
     profile.transactionHashes = [...(profile.transactionHashes || []), txHash];
-    await userAiProfileRepository.save(profile);
+    await refreshListingSummary(profile, tid);
 
     invalidateWalletNftCache(authAddress);
     if (sellerWallet) invalidateWalletNftCache(sellerWallet);
@@ -1186,20 +1305,70 @@ blockchainRouter.get('/history/:tokenId', async (req: Request, res: Response) =>
 
 /**
  * GET /blockchain/marketplace/listings
- * Active listings — public, anyone can browse. Sourced from
- * user_ai_profile where listingActive=true AND isImmutable=true.
+ * Public browse — ONE card per bucket that has ≥1 active listing. Each card
+ * carries the floor (min per-unit price), total copies available across all
+ * sellers, and the seller count. Sourced from nft_listing (the per-(token,
+ * seller) rows). Use /marketplace/listings/:tokenId for the per-seller detail.
  */
 blockchainRouter.get('/marketplace/listings', async (req: Request, res: Response) => {
   try {
+    const active = await nftListingRepository.find({ where: { active: true } });
+    if (active.length === 0) return res.status(200).json({ listings: [] });
+
+    // Group active rows by bucket.
+    const byProfile = new Map<string, NftListing[]>();
+    for (const l of active) {
+      const arr = byProfile.get(l.profileId) || [];
+      arr.push(l);
+      byProfile.set(l.profileId, arr);
+    }
+
     const profiles = await userAiProfileRepository.find({
-      where: { listingActive: true, isImmutable: true },
-      order: { mintedAt: 'DESC' },
+      where: { id: In([...byProfile.keys()]), isImmutable: true },
     });
     const counts = await countContextsByProfile(profiles.map((p) => p.id));
-    return res.status(200).json({ listings: profiles.map((p) => serializeBucketAsNft(p, counts[p.id] ?? 0)) });
+
+    const listings = profiles.map((p) => {
+      const rows = byProfile.get(p.id) || [];
+      const floor = rows
+        .map((r) => BigInt(r.price))
+        .reduce((min, x) => (x < min ? x : min))
+        .toString();
+      const copiesAvailable = rows.reduce((s, r) => s + r.amount, 0);
+      return {
+        ...serializeBucketAsNft(p, counts[p.id] ?? 0),
+        listingActive: true,
+        listingPrice: floor, // floor per-unit — cards show "from {floor}"
+        floorPrice: floor,
+        copiesAvailable,
+        sellerCount: rows.length,
+      };
+    });
+
+    return res.status(200).json({ listings });
   } catch (error: any) {
     Logger.error('Failed to get marketplace listings:', error);
     return res.status(500).json({ error: 'Failed to get listings' });
+  }
+});
+
+/**
+ * GET /blockchain/marketplace/listings/:tokenId
+ * Per-seller listing detail for one bucket (the "choose a seller" view behind
+ * a marketplace card). Sorted cheapest per-unit first.
+ */
+blockchainRouter.get('/marketplace/listings/:tokenId', async (req: Request, res: Response) => {
+  try {
+    const tid = parseInt(req.params.tokenId);
+    if (!Number.isInteger(tid)) return res.status(400).json({ error: 'Invalid tokenId' });
+    const rows = await nftListingRepository.find({ where: { tokenId: tid, active: true } });
+    const sellers = rows
+      .map((r) => ({ seller: r.seller, price: r.price, amount: r.amount }))
+      .sort((a, b) => (BigInt(a.price) < BigInt(b.price) ? -1 : BigInt(a.price) > BigInt(b.price) ? 1 : 0));
+    return res.status(200).json({ tokenId: tid, sellers });
+  } catch (error: any) {
+    Logger.error('Failed to get token listings:', error);
+    return res.status(500).json({ error: 'Failed to get token listings' });
   }
 });
 

@@ -310,6 +310,12 @@
       },
       {
         "indexed": false,
+        "internalType": "uint256",
+        "name": "amount",
+        "type": "uint256"
+      },
+      {
+        "indexed": false,
         "internalType": "uint96",
         "name": "marketplaceFeeBpsAtList",
         "type": "uint96"
@@ -385,6 +391,12 @@
       {
         "indexed": false,
         "internalType": "uint256",
+        "name": "copies",
+        "type": "uint256"
+      },
+      {
+        "indexed": false,
+        "internalType": "uint256",
         "name": "timestamp",
         "type": "uint256"
       }
@@ -416,7 +428,13 @@
       {
         "indexed": false,
         "internalType": "uint256",
-        "name": "price",
+        "name": "unitPrice",
+        "type": "uint256"
+      },
+      {
+        "indexed": false,
+        "internalType": "uint256",
+        "name": "amount",
         "type": "uint256"
       },
       {
@@ -801,6 +819,19 @@
   },
   {
     "inputs": [],
+    "name": "MAX_COPIES",
+    "outputs": [
+      {
+        "internalType": "uint256",
+        "name": "",
+        "type": "uint256"
+      }
+    ],
+    "stateMutability": "view",
+    "type": "function"
+  },
+  {
+    "inputs": [],
     "name": "MAX_MARKETPLACE_FEE_BPS",
     "outputs": [
       {
@@ -924,6 +955,16 @@
         "internalType": "uint256",
         "name": "tokenId",
         "type": "uint256"
+      },
+      {
+        "internalType": "address",
+        "name": "seller",
+        "type": "address"
+      },
+      {
+        "internalType": "uint256",
+        "name": "amount",
+        "type": "uint256"
       }
     ],
     "name": "buyBucket",
@@ -1016,18 +1057,23 @@
         "internalType": "uint256",
         "name": "tokenId",
         "type": "uint256"
+      },
+      {
+        "internalType": "address",
+        "name": "seller",
+        "type": "address"
       }
     ],
     "name": "getListing",
     "outputs": [
       {
-        "internalType": "address",
-        "name": "seller",
-        "type": "address"
+        "internalType": "uint256",
+        "name": "price",
+        "type": "uint256"
       },
       {
         "internalType": "uint256",
-        "name": "price",
+        "name": "amount",
         "type": "uint256"
       },
       {
@@ -1159,6 +1205,11 @@
         "internalType": "uint256",
         "name": "price",
         "type": "uint256"
+      },
+      {
+        "internalType": "uint256",
+        "name": "amount",
+        "type": "uint256"
       }
     ],
     "name": "listBucket",
@@ -1172,18 +1223,23 @@
         "internalType": "uint256",
         "name": "",
         "type": "uint256"
+      },
+      {
+        "internalType": "address",
+        "name": "",
+        "type": "address"
       }
     ],
     "name": "listings",
     "outputs": [
       {
-        "internalType": "address",
-        "name": "seller",
-        "type": "address"
+        "internalType": "uint256",
+        "name": "price",
+        "type": "uint256"
       },
       {
         "internalType": "uint256",
-        "name": "price",
+        "name": "amount",
         "type": "uint256"
       },
       {
@@ -1237,6 +1293,11 @@
         "internalType": "string",
         "name": "metadataURI",
         "type": "string"
+      },
+      {
+        "internalType": "uint256",
+        "name": "copies",
+        "type": "uint256"
       }
     ],
     "name": "mintBucket",
@@ -1413,12 +1474,12 @@
     "outputs": [
       {
         "internalType": "address",
-        "name": "receiver",
+        "name": "",
         "type": "address"
       },
       {
         "internalType": "uint256",
-        "name": "amount",
+        "name": "",
         "type": "uint256"
       }
     ],
