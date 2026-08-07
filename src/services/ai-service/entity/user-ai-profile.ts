@@ -52,6 +52,11 @@ export class UserAiProfile {
   @Column({ type: 'int', nullable: true })
   mintedTokenId: number | null;
 
+  // Edition size (number of copies) this bucket was minted with (1..MAX_COPIES).
+  // Set at /mint/confirm from the on-chain BucketMinted event. NULL for drafts.
+  @Column({ type: 'int', nullable: true })
+  editionSize: number | null;
+
   @Column({ type: 'timestamp', nullable: true })
   mintedAt: Date | null;
 
