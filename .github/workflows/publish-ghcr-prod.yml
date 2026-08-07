@@ -36,7 +36,7 @@ jobs:
             echo "Using version from package.json: $VERSION"
           fi
           echo "VERSION=$VERSION" >> $GITHUB_ENV
-          echo "PRE_IMAGE=ghcr.io/web3-plurality/plurality-backend-api-pre:$VERSION" >> $GITHUB_ENV
+          echo "PRE_IMAGE=ghcr.io/web3-plurality/plurality-market-backend-pre:$VERSION" >> $GITHUB_ENV
 
       - name: Verify Pre-release Image Exists
         run: |
@@ -56,14 +56,14 @@ jobs:
       - name: Promote to Production Tags
         run: |
           echo "Promoting to production..."
-          echo "Tagging as: ghcr.io/web3-plurality/plurality-backend-api:${{ env.VERSION }}"
-          docker tag ${{ env.PRE_IMAGE }} ghcr.io/web3-plurality/plurality-backend-api:${{ env.VERSION }}
+          echo "Tagging as: ghcr.io/web3-plurality/plurality-market-backend:${{ env.VERSION }}"
+          docker tag ${{ env.PRE_IMAGE }} ghcr.io/web3-plurality/plurality-market-backend:${{ env.VERSION }}
 
-          echo "Tagging as: ghcr.io/web3-plurality/plurality-backend-api:latest"
-          docker tag ${{ env.PRE_IMAGE }} ghcr.io/web3-plurality/plurality-backend-api:latest
+          echo "Tagging as: ghcr.io/web3-plurality/plurality-market-backend:latest"
+          docker tag ${{ env.PRE_IMAGE }} ghcr.io/web3-plurality/plurality-market-backend:latest
 
           echo "Pushing production tags..."
-          docker push ghcr.io/web3-plurality/plurality-backend-api:${{ env.VERSION }}
-          docker push ghcr.io/web3-plurality/plurality-backend-api:latest
+          docker push ghcr.io/web3-plurality/plurality-market-backend:${{ env.VERSION }}
+          docker push ghcr.io/web3-plurality/plurality-market-backend:latest
 
           echo "Successfully promoted pre-release ${{ env.PRE_IMAGE }} to production version ${{ env.VERSION }} and latest"
