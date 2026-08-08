@@ -7,12 +7,8 @@ import { UserContext } from '../entity/user-context';
 import { UserAiProfile } from '../entity/user-ai-profile';
 import Logger from '../../../lib/logger';
 import { v2 as cloudinary } from 'cloudinary';
-import { userProfileOperations, smartProfileOperations } from '../../../lib/metrics';
 import { validate as isValidUUID } from 'uuid';
-import { resolveProfileAccess } from '../utils/permission';
 import { walletToBucketHashes } from '../../blockchain-service/utils/wallet-nfts';
-import { logActivity } from '../utils/activity';
-import { notifyShareMembers } from '../utils/notify';
 
 dotenv.config();
 export const profileRouter = express.Router();
@@ -64,11 +60,6 @@ export async function createProfile(userId: string, profileName: string, image: 
   });
 
   const savedProfile = await userAiProfileRepository.save(aiProfile);
-
-  // Track profile creation
-  smartProfileOperations.inc({ operation: 'create', status: 'success' });
-
-  userProfileOperations.inc({ user_id: userId, operation: 'create' });
 
   return savedProfile;
 }
@@ -176,8 +167,6 @@ profileRouter.get('/', isAuthenticatedNativeOrMcp('mcp:tools'), async (req: Requ
           ...profile,
           contextCount,
           isOwner: true,
-          role: 'owner' as const,
-          sharedBy: null,
         };
       }),
     );
@@ -185,50 +174,6 @@ profileRouter.get('/', isAuthenticatedNativeOrMcp('mcp:tools'), async (req: Requ
     res.status(200).json({ profiles: ownedWithCounts });
   } catch (error) {
     Logger.error('Error fetching AI profiles:', error);
-    res.status(500).json({ error: 'Internal Server Error' });
-  }
-});
-
-// READ: Get specific AI profile by ID (owner or shared)
-profileRouter.get('/:profileId', isAuthenticatedNativeOrMcp('mcp:tools'), async (req: Request, res: Response) => {
-  // #swagger.tags = ['AI-Profile']
-  /* #swagger.security = [{
-            "bearerAuth": []
-    }] */
-  try {
-    const userId = req?.user?.id;
-    const authAddress = req?.user?.authAddress;
-    const { profileId } = req.params;
-
-    if (!userId || !authAddress) {
-      return res.status(401).json({ error: 'User not authenticated' });
-    }
-
-    // Validate profileId is a valid UUID
-    if (!isValidUUID(profileId)) {
-      return res.status(400).json({ error: 'Invalid Profile ID format. Expected a valid UUID.' });
-    }
-
-    const access = await resolveProfileAccess(authAddress, userId, profileId);
-    if (!access.hasAccess) {
-      return res.status(404).json({ error: 'AI profile not found' });
-    }
-
-    const profile = await userAiProfileRepository.findOne({
-      where: { id: profileId },
-    });
-
-    if (!profile) {
-      return res.status(404).json({ error: 'AI profile not found' });
-    }
-
-    res.status(200).json({
-      ...profile,
-      isOwner: access.isOwner,
-      role: access.effectiveRole,
-    });
-  } catch (error) {
-    Logger.error('Error fetching AI profile:', error);
     res.status(500).json({ error: 'Internal Server Error' });
   }
 });
@@ -300,33 +245,11 @@ profileRouter.put('/:profileId', isAuthenticated, async (req: Request, res: Resp
       }
     }
 
-    // Capture old name for activity log
-    const oldName = profile.profileName;
-
     // Update profile fields
     if (sanitizedProfileName) profile.profileName = sanitizedProfileName;
     if (image !== undefined) profile.image = image;
 
     const updatedProfile = await userAiProfileRepository.save(profile);
-
-    // Fire-and-forget: log rename activity + notify
-    if (sanitizedProfileName && sanitizedProfileName !== oldName) {
-      logActivity(profileId, userId as string, 'bucket_renamed', {
-        metadata: { oldName, newName: sanitizedProfileName },
-      });
-      notifyShareMembers(
-        profileId,
-        userId as string,
-        'bucket_renamed',
-        `Profile renamed from '${oldName}' to '${sanitizedProfileName}'`,
-        undefined,
-        {
-          profileId,
-          oldName,
-          newName: sanitizedProfileName,
-        },
-      );
-    }
 
     res.status(200).json(updatedProfile);
   } catch (error) {
@@ -399,92 +322,6 @@ profileRouter.delete('/:profileId', isAuthenticated, async (req: Request, res: R
     });
   } catch (error) {
     Logger.error('Error deleting AI profile:', error);
-    res.status(500).json({ error: 'Internal Server Error' });
-  }
-});
-
-// PUBLISH/UNPUBLISH: Toggle profile visibility
-profileRouter.patch('/:profileId/publish', isAuthenticated, async (req: Request, res: Response) => {
-  // #swagger.tags = ['AI-Profile']
-  /* #swagger.security = [{
-            "bearerAuth": []
-    }] */
-  try {
-    const userId = req?.user?.id;
-    const { profileId } = req.params;
-    const { published } = req.body;
-
-    // Validate profileId is a valid UUID
-    if (!isValidUUID(profileId)) {
-      return res.status(400).json({ error: 'Invalid Profile ID format. Expected a valid UUID.' });
-    }
-
-    // Validate required fields
-    if (typeof published !== 'boolean') {
-      return res.status(400).json({ error: 'Published status is required and must be a boolean' });
-    }
-
-    // Find the profile to ensure it belongs to the authenticated user
-    const profile = await userAiProfileRepository.findOne({
-      where: { id: profileId, userId },
-    });
-
-    if (!profile) {
-      return res.status(404).json({ error: 'AI profile not found or you do not have permission to modify it' });
-    }
-
-    // Update the published status
-    profile.published = published;
-    const updatedProfile = await userAiProfileRepository.save(profile);
-
-    res.status(200).json({
-      message: `Profile ${published ? 'published' : 'unpublished'} successfully`,
-      profile: updatedProfile,
-    });
-  } catch (error) {
-    Logger.error('Error updating profile publish status:', error);
-    res.status(500).json({ error: 'Internal Server Error' });
-  }
-});
-
-// PIN/UNPIN: Toggle profile pin status
-profileRouter.patch('/:profileId/pin', isAuthenticated, async (req: Request, res: Response) => {
-  // #swagger.tags = ['AI-Profile']
-  /* #swagger.security = [{
-            "bearerAuth": []
-    }] */
-  try {
-    const userId = req?.user?.id;
-    const { profileId } = req.params;
-    const { isPinned } = req.body;
-
-    // Validate profileId is a valid UUID
-    if (!isValidUUID(profileId)) {
-      return res.status(400).json({ error: 'Invalid Profile ID format. Expected a valid UUID.' });
-    }
-
-    // Validate required fields
-    if (typeof isPinned !== 'boolean') {
-      return res.status(400).json({ error: 'isPinned status is required and must be a boolean' });
-    }
-
-    // Check if user owns this profile
-    const profile = await userAiProfileRepository.findOne({
-      where: { id: profileId, userId },
-    });
-
-    if (!profile) {
-      return res.status(404).json({ error: 'AI profile not found or you do not own it' });
-    }
-
-    profile.isPinned = isPinned ? true : null;
-    const updatedProfile = await userAiProfileRepository.save(profile);
-    return res.status(200).json({
-      message: `Profile ${isPinned ? 'pinned' : 'unpinned'} successfully`,
-      profile: updatedProfile,
-    });
-  } catch (error) {
-    Logger.error('Error updating profile pin status:', error);
     res.status(500).json({ error: 'Internal Server Error' });
   }
 });

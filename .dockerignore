@@ -9,10 +9,6 @@ logs
 dist
 testing
 
-# Stripe CLI binary
-stripe.exe
-stripe
-
 # Git files
 .git
 .gitignore

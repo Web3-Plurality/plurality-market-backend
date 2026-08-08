@@ -10,7 +10,6 @@ import { AppDataSource } from './data-source';
 // auth service routers (wallet-only stack — auth-otp not mounted)
 import { authSiweRouter } from './services/auth-service/controllers/auth-siwe-controller';
 // user service routers
-import { userOnboardingRouter } from './services/user-service/controllers/user-onboarding-controller';
 import { userAccountRouter } from './services/user-service/controllers/user-account-controller';
 // ai service routers
 import { contextRouter } from './services/ai-service/controllers/context-controller';
@@ -18,9 +17,6 @@ import { profileRouter } from './services/ai-service/controllers/profile-control
 import { mcpRouter } from './services/ai-service/controllers/mcp-controller';
 // token service router (PATs)
 import { tokenRouter } from './services/token-service/controllers/token-controller';
-// Metrics
-import { metricsMiddleware } from './middlewares/metrics-middleware';
-import { register } from './lib/metrics';
 import Logger from './lib/logger';
 import { errorHandler, notFoundHandler } from './middlewares/error-handler';
 // blockchain service router
@@ -40,14 +36,10 @@ app.use(cookieParser());
 const allowedOrigin = process.env.MARKETPLACE_UI_ORIGIN || 'http://localhost:3001';
 app.use(cors({ origin: allowedOrigin, credentials: true }));
 
-// Metrics middleware (must be before routes)
-app.use(metricsMiddleware);
-
 // auth service routers (wallet-only — no /auth/otp mount; OAuth removed)
 app.use('/auth/siwe', authSiweRouter);
 
 // user service routers
-app.use('/user/onboarding', userOnboardingRouter);
 app.use('/user/account', userAccountRouter);
 
 // ai service router
@@ -84,18 +76,6 @@ if (enableSwagger) {
 } else {
   Logger.info('[SWAGGER] Docs disabled (NODE_ENV=production, set ENABLE_SWAGGER_DOCS=true to enable)');
 }
-
-// Metrics endpoint for Prometheus
-// eslint-disable-next-line @typescript-eslint/no-explicit-any
-app.get('/metrics', async (req: any, res: any) => {
-  // #swagger.ignore = true
-  try {
-    res.set('Content-Type', register.contentType);
-    res.end(await register.metrics());
-  } catch (error) {
-    res.status(500).end(error);
-  }
-});
 
 // 404 handler - must be after all routes
 app.use(notFoundHandler);

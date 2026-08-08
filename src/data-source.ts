@@ -11,10 +11,18 @@ dotenv.config();
 pg.types.setTypeParser(1114, (stringValue: string) => new Date(stringValue + 'Z'));
 pg.types.setTypeParser(1184, (stringValue: string) => new Date(stringValue));
 
+// Optional TLS CA for managed Postgres (e.g. AWS RDS). Point DB_SSL_CA_PATH
+// at a CA bundle to enable verified TLS; without one (local Postgres, CI)
+// the connection is made without TLS.
+const dbCaPath = process.env.DB_SSL_CA_PATH || 'certificates/eu-north-1-bundle.pem';
+const dbSsl = fs.existsSync(dbCaPath)
+  ? { require: true, rejectUnauthorized: true, ca: fs.readFileSync(dbCaPath).toString() }
+  : undefined;
+
 export const AppDataSource = new DataSource({
   type: 'postgres',
   host: process.env.DB_HOST,
-  port: 5432,
+  port: parseInt(process.env.DB_PORT || '5432', 10),
   username: process.env.DB_USER,
   password: process.env.DB_PASSWORD,
   database: process.env.DB_NAME,
@@ -28,12 +36,9 @@ export const AppDataSource = new DataSource({
     // user_ai_profile (mintedTokenId, mintTxHash, …).
     'src/services/blockchain-service/entity/*.ts',
   ],
+  // NOTE: schema sync is convenient for dev but a footgun against a real DB
+  // (it can drop removed columns). Move to migrations before accepting
+  // outside contributions.
   synchronize: true,
-  ssl: {
-    // eslint-disable-next-line
-    // @ts-ignore
-    require: true,
-    rejectUnauthorized: true, // Set to true in production with a valid certificate
-    ca: fs.readFileSync('certificates/eu-north-1-bundle.pem').toString(),
-  },
+  ssl: dbSsl,
 });

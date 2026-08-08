@@ -47,9 +47,6 @@ export class PersonalAccessToken {
   @Column({ type: 'timestamptz', nullable: true })
   revokedAt: Date | null;
 
-  @Column({ type: 'uuid', nullable: true })
-  rotatedToId: string | null;
-
   @Column({ type: 'varchar', length: 45, nullable: true })
   createdIp: string | null;
 }

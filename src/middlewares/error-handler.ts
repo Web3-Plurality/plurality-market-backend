@@ -1,7 +1,7 @@
 import { Request, Response, NextFunction } from 'express';
 import Logger from '../lib/logger';
 
-const SENSITIVE_KEYS = ['password', 'token', 'code', 'otp', 'secret', 'authorization', 'session_key', 'chatEncKey'];
+const SENSITIVE_KEYS = ['password', 'token', 'code', 'secret', 'authorization', 'session_key'];
 
 function sanitizeBody(body: any): any {
   if (!body || typeof body !== 'object') return body;
@@ -21,7 +21,6 @@ export const errorHandler = (err: any, req: Request, res: Response, _next: NextF
     path: req.path,
     method: req.method,
     userId: req?.user?.id,
-    clientAppId: req?.clientApp?.id,
     query: req.query,
     body: sanitizeBody(req.body),
     headers: {

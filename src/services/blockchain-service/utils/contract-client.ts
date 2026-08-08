@@ -6,27 +6,28 @@ import { uuidToBytes16 } from './hash-utils';
 
 export class ContractClient {
   private provider: ethers.JsonRpcProvider;
-  private signer: ethers.Wallet;
   private memoryNFT: ethers.Contract;
   private contextRegistry: ethers.Contract;
 
   constructor() {
     const rpcUrl = process.env.BLOCKCHAIN_RPC_URL;
-    const privateKey = process.env.BACKEND_WALLET_PRIVATE_KEY;
     const nftAddress = process.env.MEMORY_NFT_CONTRACT_ADDRESS;
     const registryAddress = process.env.CONTEXT_REGISTRY_ADDRESS;
 
-    if (!rpcUrl || !privateKey || !nftAddress || !registryAddress) {
+    if (!rpcUrl || !nftAddress || !registryAddress) {
       Logger.warn('Blockchain configuration incomplete. On-chain features will be unavailable.');
     }
 
+    // The backend never sends transactions — every state-changing call is
+    // encoded here and signed by the user's wallet client-side. All on-chain
+    // reads are view calls, so a plain provider is enough; no hot wallet key.
     this.provider = new ethers.JsonRpcProvider(rpcUrl || 'https://testnet.sapphire.oasis.io');
-    this.signer = new ethers.Wallet(
-      privateKey || '0x0000000000000000000000000000000000000000000000000000000000000001',
+    this.memoryNFT = new ethers.Contract(nftAddress || ethers.ZeroAddress, PluralityMemoryNFTABI, this.provider);
+    this.contextRegistry = new ethers.Contract(
+      registryAddress || ethers.ZeroAddress,
+      ContextRegistryABI,
       this.provider,
     );
-    this.memoryNFT = new ethers.Contract(nftAddress || ethers.ZeroAddress, PluralityMemoryNFTABI, this.signer);
-    this.contextRegistry = new ethers.Contract(registryAddress || ethers.ZeroAddress, ContextRegistryABI, this.signer);
   }
 
   /**
@@ -35,7 +36,6 @@ export class ContractClient {
   isConfigured(): boolean {
     return !!(
       process.env.BLOCKCHAIN_RPC_URL &&
-      process.env.BACKEND_WALLET_PRIVATE_KEY &&
       process.env.MEMORY_NFT_CONTRACT_ADDRESS &&
       process.env.CONTEXT_REGISTRY_ADDRESS
     );
@@ -202,33 +202,6 @@ export class ContractClient {
   }
 
   /**
-   * Get every contextId registered under a bucketHash. Backend uses this
-   * to confirm a batch registration tx landed on-chain.
-   */
-  async getContextsByBucketHash(bucketHash: string): Promise<string[]> {
-    const ids: string[] = await this.contextRegistry.getContextsByBucketHash(bucketHash);
-    return ids;
-  }
-
-  /**
-   * Get provenance info for a content hash.
-   */
-  async getProvenanceByHash(contentHash: string): Promise<{
-    contextId: string;
-    registeredAt: number;
-    registeredBy: string;
-    bucketHash: string;
-  }> {
-    const result = await this.contextRegistry.getProvenanceByHash(contentHash);
-    return {
-      contextId: result[0],
-      registeredAt: Number(result[1]),
-      registeredBy: result[2],
-      bucketHash: result[3],
-    };
-  }
-
-  /**
    * Get every bucketHash the given wallet currently holds an NFT for.
    * This is the chain-of-truth lookup behind the permission resolver —
    * an immutable bucket is readable iff its bucketHash appears in this set.
@@ -237,20 +210,6 @@ export class ContractClient {
   async getBucketHashesByOwner(address: string): Promise<string[]> {
     const raw: string[] = await this.memoryNFT.getBucketHashesByOwner(address);
     return raw.map((h) => h.toLowerCase());
-  }
-
-  /**
-   * Get token URI (metadata URI) for a token.
-   */
-  async getTokenURI(tokenId: number): Promise<string> {
-    return this.memoryNFT.uri(tokenId);
-  }
-
-  /**
-   * Get the bucket context count on-chain.
-   */
-  async getBucketContextCount(bucketTokenId: number): Promise<number> {
-    return Number(await this.contextRegistry.getBucketContextCount(bucketTokenId));
   }
 
   /**
@@ -359,14 +318,6 @@ export class ContractClient {
     }
 
     return events;
-  }
-
-  /**
-   * Revoke a context on-chain (soft-delete).
-   */
-  async revokeContext(contextId: string): Promise<ethers.TransactionResponse> {
-    const contextIdBytes = uuidToBytes16(contextId);
-    return this.contextRegistry.revokeContext(contextIdBytes);
   }
 }
 

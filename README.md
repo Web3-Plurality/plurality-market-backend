@@ -11,8 +11,9 @@ REST API for the Plurality Market stack. Serves the Marketplace UI (Studio + C2C
 
 - Node.js `20+` (the Dockerfile pins `node:20-slim`)
 - Reachable Postgres (`DB_HOST`/`DB_USER`/`DB_NAME`/`DB_PASSWORD` in `.env`)
-- A funded Sapphire Testnet wallet (`BACKEND_WALLET_PRIVATE_KEY`) for any signer paths
 - A running `plurality-market-ai-service` at `AI_SERVICE_URL` (default `http://localhost:8001`)
+
+The backend never signs transactions — all on-chain writes are prepared as calldata and signed by the user's wallet in the browser, so no backend wallet key is needed.
 
 ## Setup
 
@@ -37,6 +38,8 @@ DB_PORT=5432
 DB_NAME=...
 DB_USER=...
 DB_PASSWORD=...
+# Optional: CA bundle path for verified TLS to managed Postgres (e.g. AWS RDS)
+# DB_SSL_CA_PATH=certificates/rds-ca-bundle.pem
 
 # AI service
 AI_SERVICE_URL=http://localhost:8001
@@ -44,7 +47,6 @@ AI_SERVICE_API_KEY=<same as ai-service CONTEXT_API_KEY>
 
 # Blockchain (Oasis Sapphire Testnet)
 BLOCKCHAIN_RPC_URL=https://testnet.sapphire.oasis.io
-BACKEND_WALLET_PRIVATE_KEY=0x...
 MEMORY_NFT_CONTRACT_ADDRESS=0x83C5846569156ce0Dd4b988f3c2b510423B2fcdc
 CONTEXT_REGISTRY_ADDRESS=0xDBED42F3e8b860831cFb0B67dd67400f900aEB9C
 REPUTATION_REGISTRY_ADDRESS=0xca998e6C770B84fbEE6319d16F4781bc1C9E9757
@@ -52,7 +54,7 @@ REPUTATION_REGISTRY_ADDRESS=0xca998e6C770B84fbEE6319d16F4781bc1C9E9757
 API_BASE_URL=http://localhost:5000
 ```
 
-> Contract addresses above are the live v5 deployment (Sapphire Testnet). See [`plurality-context-contracts/deployments.market.json`](../plurality-context-contracts/deployments.market.json) for the canonical record.
+> Contract addresses above are the live v5 deployment on Sapphire Testnet; swap in your own deployment's addresses if you run the contracts yourself.
 
 ## Running
 

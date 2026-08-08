@@ -50,14 +50,8 @@ export class UserContext {
   @Column({ type: 'text', nullable: true })
   sourcePlatform: string; // For chat contexts: 'chatgpt' | 'claude' | 'gemini' | etc.
 
-  @Column({ type: 'text', nullable: true })
-  sourceUrl: string; // URL of the page the content was captured from (extension save-page / save-text / save-chat)
-
   @Column({ type: 'bigint', nullable: true })
   contentSize: number; // Size in bytes for all content types (files, text, chat)
-
-  @Column({ type: 'uuid', nullable: true })
-  addedBy: string; // Tracks who actually added this context (for shared bucket editor-own-only enforcement)
 
   // On-chain provenance fields
   @Column({ type: 'varchar', nullable: true })

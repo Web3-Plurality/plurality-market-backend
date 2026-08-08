@@ -137,47 +137,6 @@ class SSEManager {
       });
     }, 30000); // Send heartbeat every 30 seconds
   }
-
-  /**
-   * Get count of active connections
-   */
-  getActiveConnectionsCount(): number {
-    let count = 0;
-    this.clients.forEach((userClients) => {
-      count += userClients.length;
-    });
-    return count;
-  }
-
-  /**
-   * Get active connections for a specific user
-   */
-  getUserConnectionsCount(userId: string): number {
-    return this.clients.get(userId)?.length || 0;
-  }
-
-  /**
-   * Cleanup - stop heartbeat and close all connections
-   */
-  cleanup(): void {
-    if (this.heartbeatInterval) {
-      clearInterval(this.heartbeatInterval);
-      this.heartbeatInterval = null;
-    }
-
-    this.clients.forEach((userClients) => {
-      userClients.forEach((client) => {
-        try {
-          client.response.end();
-        } catch (error) {
-          Logger.error(`Error closing SSE connection:`, error);
-        }
-      });
-    });
-
-    this.clients.clear();
-    Logger.info('SSE Manager cleaned up');
-  }
 }
 
 // Singleton instance

@@ -90,10 +90,11 @@ export async function resolveProfileAccess(
   const held = await walletToBucketHashes(authAddress);
   if (!held.has(profile.bucketHash.toLowerCase())) return NO_ACCESS;
 
-  // ownerId stays as the original creator's userId. AI-service writes are
-  // blocked on immutable buckets by Phase 8's assertEditable, so no caller
-  // should be using ownerId to namespace a *write* in this branch. Reads
-  // are addressed by profileId, not ownerId.
+  // ownerId stays as the original creator's userId. Writes on immutable
+  // buckets are blocked by the controllers' isImmutable checks (and the
+  // throw inside bucket-hash recomputeAndStore), so no caller should be
+  // using ownerId to namespace a *write* in this branch. Reads are
+  // addressed by profileId, not ownerId.
   return {
     hasAccess: true,
     effectiveRole: 'owner',
@@ -104,8 +105,8 @@ export async function resolveProfileAccess(
 }
 
 /**
- * Single-owner model: anyone with access can edit (subject to assertEditable
- * gating in Phase 8 which blocks all writes on immutable buckets).
+ * Single-owner model: anyone with access can edit (writes on immutable
+ * buckets are blocked separately by the controllers' isImmutable checks).
  */
 export function canEditContext(access: AccessResult, _context: UserContext, _userId: string): boolean {
   return access.hasAccess && access.isOwner;
@@ -117,31 +118,4 @@ export function canEditContext(access: AccessResult, _context: UserContext, _use
  */
 export function hasMinRole(access: AccessResult, _minRole: 'viewer' | 'editor' | 'owner'): boolean {
   return access.hasAccess && access.isOwner;
-}
-
-/**
- * Throw if a bucket is immutable. Use at the top of every context-write
- * handler in Phase 8. Pulled into this module so all permission logic lives
- * in one file.
- */
-export class ImmutableBucketError extends Error {
-  constructor(profileId: string) {
-    super(`Bucket ${profileId} is immutable (minted); writes are not allowed`);
-    this.name = 'ImmutableBucketError';
-  }
-}
-
-export async function assertEditable(profileId: string): Promise<void> {
-  const profile = await userAiProfileRepository.findOne({
-    where: { id: profileId },
-    select: ['id', 'isImmutable'],
-  });
-  if (!profile) {
-    // Caller's permission check should already have caught this; the assert
-    // is defense-in-depth so missing rows aren't silently treated as editable.
-    throw new ImmutableBucketError(profileId);
-  }
-  if (profile.isImmutable) {
-    throw new ImmutableBucketError(profileId);
-  }
 }

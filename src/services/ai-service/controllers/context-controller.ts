@@ -9,13 +9,9 @@ import Logger from '../../../lib/logger';
 import multer from 'multer';
 import FormData from 'form-data';
 import { createProfile } from './profile-controller';
-import { userRagRequests, userQueryRequests } from '../../../lib/metrics';
 import { sseManager } from '../utils/sse-manager';
 import { v4 as uuidv4, validate as isValidUUID } from 'uuid';
-import { User } from '../../user-service/entity/user';
 import { resolveProfileAccess, canEditContext, hasMinRole } from '../utils/permission';
-import { logActivity } from '../utils/activity';
-import { notifyShareMembers } from '../utils/notify';
 import { hashContent } from '../../blockchain-service/utils/hash-utils';
 import { recomputeAndStore as recomputeBucketHash } from '../utils/bucket-hash';
 
@@ -26,8 +22,8 @@ const userAiProfileRepository = AppDataSource.getRepository(UserAiProfile);
 
 // Fire-and-forget wrapper: a hash recompute failure must never break the
 // user-facing add/delete. The bucketHash is rebuildable from user_context
-// at any time, so logging is sufficient. Phase 8 (`assertEditable`) is what
-// actually enforces immutability — the throw inside recomputeAndStore is
+// at any time, so logging is sufficient. Immutability is enforced by the
+// handlers' isImmutable checks — the throw inside recomputeAndStore is
 // defense-in-depth.
 function refreshBucketHash(profileId: string): void {
   recomputeBucketHash(profileId).catch((err) => {
@@ -68,27 +64,6 @@ const validateChatHistory = (chatHistory: any): { valid: boolean; error?: string
   return { valid: true };
 };
 
-// Helper function to get client IP address
-const getClientIP = (req: Request): string => {
-  // Use Express's built-in IP detection (requires trust proxy setting)
-  if (req.ip) {
-    return req.ip.replace(/^::ffff:/, ''); // Remove IPv6 prefix if present
-  }
-
-  // Fallback to ips array if available
-  if (req.ips && req.ips.length > 0) {
-    return req.ips[0].replace(/^::ffff:/, '');
-  }
-
-  // Final fallback to connection remote address
-  const remoteAddress = req.connection?.remoteAddress || req.socket?.remoteAddress;
-  if (remoteAddress) {
-    return remoteAddress.replace(/^::ffff:/, '');
-  }
-
-  return '';
-};
-
 // this is for adding raw context to the profile
 contextRouter.post('/add-raw-context', isAuthenticatedNativeOrMcp('mcp:tools'), async (req: Request, res: Response) => {
   // #swagger.tags = ['AI-Context']
@@ -127,7 +102,7 @@ contextRouter.post('/add-raw-context', isAuthenticatedNativeOrMcp('mcp:tools'), 
   try {
     const userId = req?.user?.id;
     const authAddress = req?.user?.authAddress;
-    const { profileId, context, sourcePlatform, sourceUrl, title: customTitle } = req.body;
+    const { profileId, context, sourcePlatform, title: customTitle } = req.body;
     Logger.info(`[ADD_RAW_CONTEXT] user=${userId}, profile=${profileId || 'new'}`);
 
     // Validate context input
@@ -196,9 +171,7 @@ contextRouter.post('/add-raw-context', isAuthenticatedNativeOrMcp('mcp:tools'), 
       // Metadata for source identification
       sourceType: 'text',
       sourcePlatform: sourcePlatform || null,
-      sourceUrl: sourceUrl || null,
       contentSize,
-      addedBy: userId, // track who actually added it
       contentHash: hashContent(context), // SHA-256 for on-chain provenance
     });
     await userContextRepository.save(userContext);
@@ -241,25 +214,6 @@ contextRouter.post('/add-raw-context', isAuthenticatedNativeOrMcp('mcp:tools'), 
       profile.profileName = customTitle || response?.data?.extractedTitle || 'untitled';
       await userAiProfileRepository.save(profile);
     }
-
-    // Fire-and-forget: activity log + notifications
-    logActivity(profile.id, userId as string, 'context_added', {
-      targetType: 'context',
-      targetId: contextId,
-      metadata: { title: userContext.title, sourceType: 'text' },
-    });
-    notifyShareMembers(
-      profile.id,
-      userId as string,
-      'context_added',
-      `A new context '${userContext.title}' was added to '${profile.profileName}'`,
-      undefined,
-      {
-        profileId: profile.id,
-        contextId,
-        profileName: profile.profileName,
-      },
-    );
 
     // Return the AI service response along with the saved context info
     res.status(200).json({
@@ -327,7 +281,7 @@ contextRouter.post(
     try {
       const userId = req?.user?.id;
       const authAddress = req?.user?.authAddress;
-      const { profileId, chatHistory, platform, sourceUrl, title: customTitle } = req.body;
+      const { profileId, chatHistory, platform, title: customTitle } = req.body;
       Logger.info(
         `[ADD_CHAT_CONTEXT] user=${userId}, profile=${profileId || 'new'}, messages=${chatHistory?.length || 0}`,
       );
@@ -390,10 +344,8 @@ contextRouter.post(
         // Metadata for source identification
         sourceType: 'chat',
         sourcePlatform: platform || 'unknown',
-        sourceUrl: sourceUrl || null,
         contentSize,
-        addedBy: userId, // track who actually added it
-        contentHash: hashContent(JSON.stringify(chatHistory)), // SHA-256 for on-chain provenance
+          contentHash: hashContent(JSON.stringify(chatHistory)), // SHA-256 for on-chain provenance
       });
       await userContextRepository.save(userContext);
       refreshBucketHash(profile.id);
@@ -435,25 +387,6 @@ contextRouter.post(
         profile.profileName = customTitle || response?.data?.extractedTitle || 'untitled';
         await userAiProfileRepository.save(profile);
       }
-
-      // Fire-and-forget: activity log + notifications
-      logActivity(profile.id, userId, 'context_added', {
-        targetType: 'context',
-        targetId: contextId,
-        metadata: { title: userContext.title, sourceType: 'chat' },
-      });
-      notifyShareMembers(
-        profile.id,
-        userId,
-        'context_added',
-        `A new context '${userContext.title}' was added to '${profile.profileName}'`,
-        undefined,
-        {
-          profileId: profile.id,
-          contextId,
-          profileName: profile.profileName,
-        },
-      );
 
       // Return the AI service response along with the saved context info
       res.status(200).json({
@@ -497,50 +430,12 @@ contextRouter.get('/', isAuthenticatedNativeOrMcp('mcp:tools'), async (req: Requ
         return res.status(404).json({ error: 'Profile not found' });
       }
 
-      // Get all contexts for this profile with addedBy user info
-      // COALESCE: if addedBy is NULL (pre-sharing context), fall back to owner
-      const rawContexts = await userContextRepository
-        .createQueryBuilder('c')
-        .leftJoin(User, 'u', 'u.id = COALESCE(c.addedBy, :ownerId)', { ownerId: access.ownerId })
-        .select(['c.*', 'u.name AS "addedByName"', 'u.email AS "addedByEmail"', 'u.authAddress AS "addedByWallet"'])
-        .where('c.profileId = :profileId', { profileId })
-        .orderBy('c.createdAt', 'ASC')
-        .getRawMany();
+      const contexts = await userContextRepository.find({
+        where: { profileId: profileId as string },
+        order: { createdAt: 'ASC' },
+      });
 
-      // Add canEdit flag and addedByUser per context
-      const contextsWithPermissions = rawContexts.map((ctx) => ({
-        contextId: ctx.contextId,
-        userId: ctx.userId,
-        profileId: ctx.profileId,
-        title: ctx.title,
-        description: ctx.description,
-        status: ctx.status,
-        errorMessage: ctx.errorMessage,
-        vectorIds: ctx.vectorIds,
-        createdAt: ctx.createdAt,
-        originalFileName: ctx.originalFileName,
-        sourceType: ctx.sourceType,
-        sourcePlatform: ctx.sourcePlatform,
-        sourceUrl: ctx.sourceUrl,
-        contentSize: ctx.contentSize,
-        contentHash: ctx.contentHash || null,
-        registeredOnChain: ctx.registeredOnChain || false,
-        registryTxHash: ctx.registryTxHash || null,
-        addedBy:
-          ctx.addedByName || ctx.addedByEmail || ctx.addedByWallet
-            ? {
-                id: ctx.addedBy || access.ownerId,
-                name: ctx.addedByName || null,
-                email: ctx.addedByEmail || null,
-                wallet: ctx.addedByWallet || null,
-                isOwner: !ctx.addedBy || ctx.addedBy === access.ownerId,
-              }
-            : // addedBy set but user deleted, or no user record found
-              { id: ctx.addedBy || access.ownerId, name: null, isOwner: !ctx.addedBy },
-        canEdit: canEditContext(access, ctx as UserContext, userId),
-      }));
-
-      return res.status(200).json({ contexts: contextsWithPermissions });
+      return res.status(200).json({ contexts });
     }
 
     // No profileId — return only the user's own contexts
@@ -594,51 +489,6 @@ contextRouter.get('/events', isAuthenticated, (req: Request, res: Response) => {
     // The response is handled by the SSE manager
   } catch (error) {
     Logger.error('Error in SSE endpoint:', error);
-    res.status(500).json({ error: 'Internal Server Error' });
-  }
-});
-
-contextRouter.get('/:contextId', isAuthenticatedNativeOrMcp('mcp:tools'), async (req: Request, res: Response) => {
-  // #swagger.tags = ['AI-Context']
-  /* #swagger.security = [{
-            "bearerAuth": []
-    }] */
-  try {
-    const userId = req?.user?.id;
-    const authAddress = req?.user?.authAddress;
-    const { contextId } = req.params;
-
-    if (!userId) {
-      return res.status(401).json({ error: 'User not authenticated' });
-    }
-
-    // Validate contextId is a valid UUID
-    if (!isValidUUID(contextId)) {
-      return res.status(400).json({ error: 'Invalid Context ID format. Expected a valid UUID.' });
-    }
-
-    const context = await userContextRepository.findOne({
-      where: { contextId: contextId as string },
-    });
-
-    if (!context) {
-      return res.status(404).json({ error: 'Context not found' });
-    }
-
-    // Permission check: must have viewer+ access to the parent bucket
-    const access = await resolveProfileAccess(authAddress as string, userId as string, context.profileId);
-    if (!access.hasAccess) {
-      return res.status(404).json({ error: 'Context not found' });
-    }
-
-    res.status(200).json({
-      context: {
-        ...context,
-        canEdit: canEditContext(access, context, userId),
-      },
-    });
-  } catch (error) {
-    Logger.error('Error fetching user contexts:', error);
     res.status(500).json({ error: 'Internal Server Error' });
   }
 });
@@ -702,7 +552,6 @@ contextRouter.get(
         contentType: data.contentType,
         sourceType: context.sourceType || '',
         sourcePlatform: context.sourcePlatform || '',
-        sourceUrl: context.sourceUrl || '',
         originalFileName: context.originalFileName || '',
         totalChunks: data.totalChunks,
         content: data.content,
@@ -787,24 +636,6 @@ contextRouter.delete('/:contextId', isAuthenticatedNativeOrMcp('mcp:tools'), asy
     // Delete the context from database
     await userContextRepository.remove(userContext);
     refreshBucketHash(deletedProfileId);
-
-    // Fire-and-forget: activity log + notifications
-    logActivity(deletedProfileId, userId as string, 'context_deleted', {
-      targetType: 'context',
-      targetId: contextId,
-      metadata: { title: deletedTitle },
-    });
-    notifyShareMembers(
-      deletedProfileId,
-      userId as string,
-      'context_deleted',
-      `Context '${deletedTitle}' was deleted`,
-      undefined,
-      {
-        profileId: deletedProfileId,
-        contextId,
-      },
-    );
 
     res.status(200).json({
       message: 'Context deleted successfully',
@@ -1045,7 +876,6 @@ contextRouter.post(
         originalFileName: req.file.originalname,
         sourceType: 'file',
         contentSize: req.file.size,
-        addedBy: userId,
         contentHash: hashContent(req.file.buffer), // SHA-256 for on-chain provenance
       });
       await userContextRepository.save(userContext);
@@ -1084,25 +914,6 @@ contextRouter.post(
       userContext.title = response?.data?.extractedTitle || req.file.originalname;
       userContext.description = response?.data?.extractedDescription || '';
       await userContextRepository.save(userContext);
-
-      // Fire-and-forget: activity log + notifications
-      logActivity(profileId, userId as string, 'context_added', {
-        targetType: 'context',
-        targetId: contextId,
-        metadata: { title: userContext.title, sourceType: 'file', fileName: req.file.originalname },
-      });
-      notifyShareMembers(
-        profileId,
-        userId as string,
-        'context_added',
-        `A new file '${userContext.title}' was added to '${profile.profileName}'`,
-        undefined,
-        {
-          profileId,
-          contextId,
-          profileName: profile.profileName,
-        },
-      );
 
       // Return the AI service response along with the saved context info
       res.status(200).json({
@@ -1147,7 +958,6 @@ contextRouter.post(
               errorMessage: userContext.errorMessage,
               sourceType: userContext.sourceType,
               sourcePlatform: userContext.sourcePlatform,
-              sourceUrl: userContext.sourceUrl,
               originalFileName: userContext.originalFileName,
               contentSize: userContext.contentSize,
               createdAt: userContext.createdAt,

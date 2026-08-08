@@ -1,8 +1,8 @@
 {
   "openapi": "3.0.0",
   "info": {
-    "title": "Plurality API",
-    "description": "Plurality Backend API Documentation",
+    "title": "Plurality Market Backend API",
+    "description": "Backend API for the Plurality memory-NFT marketplace",
     "version": "1.0.0"
   },
   "servers": [
@@ -14,11 +14,7 @@
   "tags": [
     {
       "name": "Auth",
-      "description": "Auth service"
-    },
-    {
-      "name": "User-Onboarding",
-      "description": "User onboarding service"
+      "description": "SIWE wallet authentication"
     },
     {
       "name": "AI-Context",
@@ -26,246 +22,26 @@
     },
     {
       "name": "AI-Profile",
-      "description": "AI profile service"
+      "description": "AI profile (memory bucket) service"
     },
     {
       "name": "User-Account",
       "description": "User account management (info, deletion)"
     },
     {
-      "name": "OAuth-Provider",
-      "description": "Hydra OAuth2/OIDC provider (login, consent, discovery, DCR)"
-    },
-    {
       "name": "MCP",
       "description": "MCP server endpoints (semantic search)"
     },
     {
-      "name": "Access",
-      "description": "Profile access management (grant, list, update, revoke)"
+      "name": "Tokens",
+      "description": "Personal Access Tokens for MCP clients"
     },
     {
-      "name": "Activity",
-      "description": "Activity log for shared profiles"
-    },
-    {
-      "name": "Notifications",
-      "description": "User notifications (shared profile events)"
-    },
-    {
-      "name": "Subscription",
-      "description": "Subscription service"
-    },
-    {
-      "name": "AppSumo",
-      "description": "AppSumo lifecycle, license activation, and review prompt"
+      "name": "Blockchain",
+      "description": "Mint, marketplace, and on-chain verification"
     }
   ],
   "paths": {
-    "/success": {
-      "get": {
-        "description": "",
-        "responses": {
-          "200": {
-            "description": "OK"
-          }
-        }
-      }
-    },
-    "/cancel": {
-      "get": {
-        "description": "",
-        "responses": {
-          "200": {
-            "description": "OK"
-          }
-        }
-      }
-    },
-    "/appsumo/login": {
-      "get": {
-        "tags": [
-          "AppSumo"
-        ],
-        "description": "",
-        "parameters": [
-          {
-            "name": "appsumo_license_key",
-            "in": "query",
-            "schema": {
-              "type": "string"
-            }
-          }
-        ],
-        "responses": {
-          "default": {
-            "description": ""
-          }
-        }
-      }
-    },
-    "/appsumo/success": {
-      "get": {
-        "tags": [
-          "AppSumo"
-        ],
-        "description": "",
-        "parameters": [
-          {
-            "name": "already_active",
-            "in": "query",
-            "schema": {
-              "type": "string"
-            }
-          }
-        ],
-        "responses": {
-          "default": {
-            "description": ""
-          }
-        }
-      }
-    },
-    "/appsumo/error": {
-      "get": {
-        "tags": [
-          "AppSumo"
-        ],
-        "description": "",
-        "parameters": [
-          {
-            "name": "error",
-            "in": "query",
-            "schema": {
-              "type": "string"
-            }
-          }
-        ],
-        "responses": {
-          "default": {
-            "description": ""
-          }
-        }
-      }
-    },
-    "/auth/otp/login": {
-      "post": {
-        "tags": [
-          "Auth"
-        ],
-        "description": "",
-        "responses": {
-          "200": {
-            "description": "OK"
-          },
-          "400": {
-            "description": "Bad Request"
-          }
-        },
-        "requestBody": {
-          "content": {
-            "application/json": {
-              "schema": {
-                "type": "object",
-                "properties": {
-                  "email": {
-                    "example": "any"
-                  }
-                }
-              }
-            }
-          }
-        }
-      }
-    },
-    "/auth/otp/authenticate": {
-      "post": {
-        "tags": [
-          "Auth"
-        ],
-        "description": "",
-        "responses": {
-          "200": {
-            "description": "OK"
-          },
-          "400": {
-            "description": "Bad Request"
-          },
-          "401": {
-            "description": "Unauthorized"
-          }
-        },
-        "requestBody": {
-          "content": {
-            "application/json": {
-              "schema": {
-                "type": "object",
-                "properties": {
-                  "code": {
-                    "example": "any"
-                  },
-                  "email_id": {
-                    "example": "any"
-                  },
-                  "subscribe": {
-                    "example": "any"
-                  }
-                }
-              }
-            }
-          }
-        }
-      }
-    },
-    "/auth/otp/session-key": {
-      "get": {
-        "tags": [
-          "Auth"
-        ],
-        "description": "",
-        "parameters": [
-          {
-            "name": "authorization",
-            "in": "header",
-            "schema": {
-              "type": "string"
-            }
-          }
-        ],
-        "responses": {
-          "200": {
-            "description": "OK"
-          },
-          "401": {
-            "description": "Unauthorized"
-          },
-          "403": {
-            "description": "Forbidden"
-          },
-          "500": {
-            "description": "Internal Server Error"
-          }
-        },
-        "security": [
-          {
-            "bearerAuth": []
-          }
-        ]
-      }
-    },
-    "/auth/otp/logout": {
-      "post": {
-        "tags": [
-          "Auth"
-        ],
-        "description": "",
-        "responses": {
-          "200": {
-            "description": "OK"
-          }
-        }
-      }
-    },
     "/auth/siwe/login": {
       "post": {
         "tags": [
@@ -355,186 +131,10 @@
         }
       }
     },
-    "/auth/hydra/login": {
-      "get": {
-        "tags": [
-          "OAuth-Provider"
-        ],
-        "description": "",
-        "parameters": [
-          {
-            "name": "login_challenge",
-            "in": "query",
-            "schema": {
-              "type": "string"
-            }
-          }
-        ],
-        "responses": {
-          "200": {
-            "description": "OK"
-          },
-          "400": {
-            "description": "Bad Request"
-          },
-          "500": {
-            "description": "Internal Server Error"
-          }
-        }
-      },
+    "/auth/siwe/logout": {
       "post": {
         "tags": [
-          "OAuth-Provider"
-        ],
-        "description": "",
-        "responses": {
-          "200": {
-            "description": "OK"
-          },
-          "400": {
-            "description": "Bad Request"
-          },
-          "401": {
-            "description": "Unauthorized"
-          },
-          "403": {
-            "description": "Forbidden"
-          },
-          "500": {
-            "description": "Internal Server Error"
-          }
-        },
-        "security": [
-          {
-            "bearerAuth": []
-          }
-        ],
-        "requestBody": {
-          "content": {
-            "application/json": {
-              "schema": {
-                "type": "object",
-                "properties": {
-                  "login_challenge": {
-                    "example": "any"
-                  }
-                }
-              }
-            }
-          }
-        }
-      }
-    },
-    "/auth/hydra/consent": {
-      "get": {
-        "tags": [
-          "OAuth-Provider"
-        ],
-        "description": "",
-        "parameters": [
-          {
-            "name": "consent_challenge",
-            "in": "query",
-            "schema": {
-              "type": "string"
-            }
-          }
-        ],
-        "responses": {
-          "200": {
-            "description": "OK"
-          },
-          "400": {
-            "description": "Bad Request"
-          },
-          "500": {
-            "description": "Internal Server Error"
-          }
-        }
-      },
-      "post": {
-        "tags": [
-          "OAuth-Provider"
-        ],
-        "description": "",
-        "responses": {
-          "200": {
-            "description": "OK"
-          },
-          "400": {
-            "description": "Bad Request"
-          },
-          "401": {
-            "description": "Unauthorized"
-          },
-          "403": {
-            "description": "Forbidden"
-          },
-          "500": {
-            "description": "Internal Server Error"
-          }
-        },
-        "security": [
-          {
-            "bearerAuth": []
-          }
-        ],
-        "requestBody": {
-          "content": {
-            "application/json": {
-              "schema": {
-                "type": "object",
-                "properties": {
-                  "consent_challenge": {
-                    "example": "any"
-                  },
-                  "grant_scope": {
-                    "example": "any"
-                  }
-                }
-              }
-            }
-          }
-        }
-      }
-    },
-    "/auth/hydra/consent/reject": {
-      "post": {
-        "tags": [
-          "OAuth-Provider"
-        ],
-        "description": "",
-        "responses": {
-          "200": {
-            "description": "OK"
-          },
-          "400": {
-            "description": "Bad Request"
-          },
-          "500": {
-            "description": "Internal Server Error"
-          }
-        },
-        "requestBody": {
-          "content": {
-            "application/json": {
-              "schema": {
-                "type": "object",
-                "properties": {
-                  "consent_challenge": {
-                    "example": "any"
-                  }
-                }
-              }
-            }
-          }
-        }
-      }
-    },
-    "/.well-known/oauth-protected-resource": {
-      "get": {
-        "tags": [
-          "OAuth-Provider"
+          "Auth"
         ],
         "description": "",
         "responses": {
@@ -544,199 +144,10 @@
         }
       }
     },
-    "/.well-known/oauth-protected-resource/mcp": {
+    "/auth/siwe/session": {
       "get": {
         "tags": [
-          "OAuth-Provider"
-        ],
-        "description": "",
-        "responses": {
-          "200": {
-            "description": "OK"
-          }
-        }
-      }
-    },
-    "/.well-known/oauth-authorization-server": {
-      "get": {
-        "tags": [
-          "OAuth-Provider"
-        ],
-        "description": "",
-        "responses": {
-          "200": {
-            "description": "OK"
-          },
-          "502": {
-            "description": "Bad Gateway"
-          }
-        }
-      }
-    },
-    "/.well-known/oauth-authorization-server/mcp": {
-      "get": {
-        "tags": [
-          "OAuth-Provider"
-        ],
-        "description": "",
-        "responses": {
-          "200": {
-            "description": "OK"
-          },
-          "502": {
-            "description": "Bad Gateway"
-          }
-        }
-      }
-    },
-    "/.well-known/openid-configuration": {
-      "get": {
-        "tags": [
-          "OAuth-Provider"
-        ],
-        "description": "",
-        "responses": {
-          "200": {
-            "description": "OK"
-          },
-          "502": {
-            "description": "Bad Gateway"
-          }
-        }
-      }
-    },
-    "/.well-known/openid-configuration/mcp": {
-      "get": {
-        "tags": [
-          "OAuth-Provider"
-        ],
-        "description": "",
-        "responses": {
-          "200": {
-            "description": "OK"
-          },
-          "502": {
-            "description": "Bad Gateway"
-          }
-        }
-      }
-    },
-    "/register": {
-      "get": {
-        "tags": [
-          "OAuth-Provider"
-        ],
-        "description": "",
-        "parameters": [
-          {
-            "name": "authorization",
-            "in": "header",
-            "schema": {
-              "type": "string"
-            }
-          }
-        ],
-        "responses": {
-          "502": {
-            "description": "Bad Gateway"
-          }
-        }
-      },
-      "post": {
-        "tags": [
-          "OAuth-Provider"
-        ],
-        "description": "",
-        "parameters": [
-          {
-            "name": "authorization",
-            "in": "header",
-            "schema": {
-              "type": "string"
-            }
-          }
-        ],
-        "responses": {
-          "502": {
-            "description": "Bad Gateway"
-          }
-        },
-        "requestBody": {
-          "content": {
-            "application/json": {
-              "schema": {
-                "type": "object",
-                "properties": {
-                  "scope": {
-                    "example": "any"
-                  }
-                }
-              }
-            }
-          }
-        }
-      }
-    },
-    "/oauth2/register": {
-      "get": {
-        "tags": [
-          "OAuth-Provider"
-        ],
-        "description": "",
-        "parameters": [
-          {
-            "name": "authorization",
-            "in": "header",
-            "schema": {
-              "type": "string"
-            }
-          }
-        ],
-        "responses": {
-          "502": {
-            "description": "Bad Gateway"
-          }
-        }
-      },
-      "post": {
-        "tags": [
-          "OAuth-Provider"
-        ],
-        "description": "",
-        "parameters": [
-          {
-            "name": "authorization",
-            "in": "header",
-            "schema": {
-              "type": "string"
-            }
-          }
-        ],
-        "responses": {
-          "502": {
-            "description": "Bad Gateway"
-          }
-        },
-        "requestBody": {
-          "content": {
-            "application/json": {
-              "schema": {
-                "type": "object",
-                "properties": {
-                  "scope": {
-                    "example": "any"
-                  }
-                }
-              }
-            }
-          }
-        }
-      }
-    },
-    "/user/onboarding/status": {
-      "get": {
-        "tags": [
-          "User-Onboarding"
+          "Auth"
         ],
         "description": "",
         "responses": {
@@ -749,53 +160,8 @@
           "403": {
             "description": "Forbidden"
           },
-          "404": {
-            "description": "Not Found"
-          },
           "500": {
             "description": "Internal Server Error"
-          }
-        }
-      }
-    },
-    "/user/onboarding/complete": {
-      "post": {
-        "tags": [
-          "User-Onboarding"
-        ],
-        "description": "",
-        "responses": {
-          "200": {
-            "description": "OK"
-          },
-          "400": {
-            "description": "Bad Request"
-          },
-          "401": {
-            "description": "Unauthorized"
-          },
-          "403": {
-            "description": "Forbidden"
-          },
-          "404": {
-            "description": "Not Found"
-          },
-          "500": {
-            "description": "Internal Server Error"
-          }
-        },
-        "requestBody": {
-          "content": {
-            "application/json": {
-              "schema": {
-                "type": "object",
-                "properties": {
-                  "name": {
-                    "example": "any"
-                  }
-                }
-              }
-            }
           }
         }
       }
@@ -1030,9 +396,6 @@
           "401": {
             "description": "Unauthorized"
           },
-          "402": {
-            "description": "Payment Required"
-          },
           "403": {
             "description": "Forbidden"
           },
@@ -1246,9 +609,6 @@
           "401": {
             "description": "Unauthorized"
           },
-          "402": {
-            "description": "Payment Required"
-          },
           "403": {
             "description": "Forbidden"
           },
@@ -1298,421 +658,6 @@
                 "required": [
                   "chatHistory"
                 ]
-              }
-            }
-          }
-        }
-      }
-    },
-    "/ai/context/query": {
-      "post": {
-        "tags": [
-          "AI-Context"
-        ],
-        "description": "",
-        "responses": {
-          "200": {
-            "description": "Query executed successfully",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "type": "object",
-                  "properties": {
-                    "type": {
-                      "type": "string",
-                      "example": "object"
-                    },
-                    "properties": {
-                      "type": "object",
-                      "properties": {
-                        "answer": {
-                          "type": "object",
-                          "properties": {
-                            "type": {
-                              "type": "string",
-                              "example": "string"
-                            },
-                            "description": {
-                              "type": "string",
-                              "example": "AI-generated answer"
-                            }
-                          }
-                        },
-                        "sources": {
-                          "type": "object",
-                          "properties": {
-                            "type": {
-                              "type": "string",
-                              "example": "array"
-                            },
-                            "items": {
-                              "type": "object",
-                              "properties": {
-                                "type": {
-                                  "type": "string",
-                                  "example": "object"
-                                }
-                              }
-                            },
-                            "description": {
-                              "type": "string",
-                              "example": "Source contexts used for the answer"
-                            }
-                          }
-                        },
-                        "tokens_used": {
-                          "type": "object",
-                          "properties": {
-                            "type": {
-                              "type": "string",
-                              "example": "object"
-                            },
-                            "properties": {
-                              "type": "object",
-                              "properties": {
-                                "input_tokens": {
-                                  "type": "object",
-                                  "properties": {
-                                    "type": {
-                                      "type": "string",
-                                      "example": "number"
-                                    }
-                                  }
-                                },
-                                "output_tokens": {
-                                  "type": "object",
-                                  "properties": {
-                                    "type": {
-                                      "type": "string",
-                                      "example": "number"
-                                    }
-                                  }
-                                },
-                                "total_tokens": {
-                                  "type": "object",
-                                  "properties": {
-                                    "type": {
-                                      "type": "string",
-                                      "example": "number"
-                                    }
-                                  }
-                                }
-                              }
-                            }
-                          }
-                        },
-                        "credits": {
-                          "type": "object",
-                          "properties": {
-                            "type": {
-                              "type": "string",
-                              "example": "object"
-                            },
-                            "properties": {
-                              "type": "object",
-                              "properties": {
-                                "remaining": {
-                                  "type": "object",
-                                  "properties": {
-                                    "type": {
-                                      "type": "string",
-                                      "example": "number"
-                                    }
-                                  }
-                                },
-                                "used": {
-                                  "type": "object",
-                                  "properties": {
-                                    "type": {
-                                      "type": "string",
-                                      "example": "number"
-                                    }
-                                  }
-                                },
-                                "totalTokensUsed": {
-                                  "type": "object",
-                                  "properties": {
-                                    "type": {
-                                      "type": "string",
-                                      "example": "number"
-                                    }
-                                  }
-                                }
-                              }
-                            },
-                            "description": {
-                              "type": "string",
-                              "example": "Credit info (only for unauthenticated users)"
-                            }
-                          }
-                        }
-                      }
-                    }
-                  },
-                  "xml": {
-                    "name": "main"
-                  }
-                }
-              },
-              "application/xml": {
-                "schema": {
-                  "type": "object",
-                  "properties": {
-                    "type": {
-                      "type": "string",
-                      "example": "object"
-                    },
-                    "properties": {
-                      "type": "object",
-                      "properties": {
-                        "answer": {
-                          "type": "object",
-                          "properties": {
-                            "type": {
-                              "type": "string",
-                              "example": "string"
-                            },
-                            "description": {
-                              "type": "string",
-                              "example": "AI-generated answer"
-                            }
-                          }
-                        },
-                        "sources": {
-                          "type": "object",
-                          "properties": {
-                            "type": {
-                              "type": "string",
-                              "example": "array"
-                            },
-                            "items": {
-                              "type": "object",
-                              "properties": {
-                                "type": {
-                                  "type": "string",
-                                  "example": "object"
-                                }
-                              }
-                            },
-                            "description": {
-                              "type": "string",
-                              "example": "Source contexts used for the answer"
-                            }
-                          }
-                        },
-                        "tokens_used": {
-                          "type": "object",
-                          "properties": {
-                            "type": {
-                              "type": "string",
-                              "example": "object"
-                            },
-                            "properties": {
-                              "type": "object",
-                              "properties": {
-                                "input_tokens": {
-                                  "type": "object",
-                                  "properties": {
-                                    "type": {
-                                      "type": "string",
-                                      "example": "number"
-                                    }
-                                  }
-                                },
-                                "output_tokens": {
-                                  "type": "object",
-                                  "properties": {
-                                    "type": {
-                                      "type": "string",
-                                      "example": "number"
-                                    }
-                                  }
-                                },
-                                "total_tokens": {
-                                  "type": "object",
-                                  "properties": {
-                                    "type": {
-                                      "type": "string",
-                                      "example": "number"
-                                    }
-                                  }
-                                }
-                              }
-                            }
-                          }
-                        },
-                        "credits": {
-                          "type": "object",
-                          "properties": {
-                            "type": {
-                              "type": "string",
-                              "example": "object"
-                            },
-                            "properties": {
-                              "type": "object",
-                              "properties": {
-                                "remaining": {
-                                  "type": "object",
-                                  "properties": {
-                                    "type": {
-                                      "type": "string",
-                                      "example": "number"
-                                    }
-                                  }
-                                },
-                                "used": {
-                                  "type": "object",
-                                  "properties": {
-                                    "type": {
-                                      "type": "string",
-                                      "example": "number"
-                                    }
-                                  }
-                                },
-                                "totalTokensUsed": {
-                                  "type": "object",
-                                  "properties": {
-                                    "type": {
-                                      "type": "string",
-                                      "example": "number"
-                                    }
-                                  }
-                                }
-                              }
-                            },
-                            "description": {
-                              "type": "string",
-                              "example": "Credit info (only for unauthenticated users)"
-                            }
-                          }
-                        }
-                      }
-                    }
-                  },
-                  "xml": {
-                    "name": "main"
-                  }
-                }
-              }
-            }
-          },
-          "400": {
-            "description": "Bad request - Missing required fields (query or profileId)"
-          },
-          "401": {
-            "description": "Unauthorized"
-          },
-          "402": {
-            "description": "Payment Required"
-          },
-          "403": {
-            "description": "Forbidden - Profile not accessible or not published (when profileId provided)"
-          },
-          "404": {
-            "description": "Profile not found (when profileId provided)"
-          },
-          "429": {
-            "description": "Insufficient credits (unauthenticated users only)"
-          },
-          "500": {
-            "description": "Internal Server Error"
-          }
-        },
-        "security": [
-          {
-            "bearerAuth": []
-          }
-        ],
-        "requestBody": {
-          "content": {
-            "application/json": {
-              "schema": {
-                "type": "object",
-                "properties": {
-                  "query": {
-                    "example": "any"
-                  },
-                  "profileId": {
-                    "example": "any"
-                  },
-                  "k": {
-                    "example": "any"
-                  },
-                  "chatHistory": {
-                    "example": "any"
-                  },
-                  "enableWebSearch": {
-                    "example": "any"
-                  },
-                  "enableUrlExtraction": {
-                    "example": "any"
-                  },
-                  "model": {
-                    "example": "any"
-                  }
-                }
-              }
-            }
-          }
-        }
-      }
-    },
-    "/ai/context/generate-prompt": {
-      "post": {
-        "tags": [
-          "AI-Context"
-        ],
-        "description": "",
-        "responses": {
-          "200": {
-            "description": "OK"
-          },
-          "400": {
-            "description": "Bad Request"
-          },
-          "401": {
-            "description": "Unauthorized"
-          },
-          "402": {
-            "description": "Payment Required"
-          },
-          "403": {
-            "description": "Forbidden"
-          },
-          "404": {
-            "description": "Not Found"
-          },
-          "500": {
-            "description": "Internal Server Error"
-          }
-        },
-        "security": [
-          {
-            "bearerAuth": []
-          }
-        ],
-        "requestBody": {
-          "content": {
-            "application/json": {
-              "schema": {
-                "type": "object",
-                "properties": {
-                  "query": {
-                    "example": "any"
-                  },
-                  "profileId": {
-                    "example": "any"
-                  },
-                  "k": {
-                    "example": "any"
-                  },
-                  "chatHistory": {
-                    "example": "any"
-                  },
-                  "platform": {
-                    "example": "any"
-                  }
-                }
               }
             }
           }
@@ -1796,90 +741,6 @@
         ]
       }
     },
-    "/ai/context/{contextId}": {
-      "get": {
-        "tags": [
-          "AI-Context"
-        ],
-        "description": "",
-        "parameters": [
-          {
-            "name": "contextId",
-            "in": "path",
-            "required": true,
-            "schema": {
-              "type": "string"
-            }
-          }
-        ],
-        "responses": {
-          "200": {
-            "description": "OK"
-          },
-          "400": {
-            "description": "Bad Request"
-          },
-          "401": {
-            "description": "Unauthorized"
-          },
-          "403": {
-            "description": "Forbidden"
-          },
-          "404": {
-            "description": "Not Found"
-          },
-          "500": {
-            "description": "Internal Server Error"
-          }
-        },
-        "security": [
-          {
-            "bearerAuth": []
-          }
-        ]
-      },
-      "delete": {
-        "tags": [
-          "AI-Context"
-        ],
-        "description": "",
-        "parameters": [
-          {
-            "name": "contextId",
-            "in": "path",
-            "required": true,
-            "schema": {
-              "type": "string"
-            }
-          }
-        ],
-        "responses": {
-          "200": {
-            "description": "OK"
-          },
-          "400": {
-            "description": "Bad Request"
-          },
-          "401": {
-            "description": "Unauthorized"
-          },
-          "403": {
-            "description": "Forbidden"
-          },
-          "404": {
-            "description": "Not Found"
-          },
-          "500": {
-            "description": "Internal Server Error"
-          }
-        },
-        "security": [
-          {
-            "bearerAuth": []
-          }
-        ]
-      }
-    },
     "/ai/context/{contextId}/content": {
       "get": {
         "tags": [
@@ -1937,12 +798,22 @@
         ]
       }
     },
-    "/ai/context/credits": {
-      "get": {
+    "/ai/context/{contextId}": {
+      "delete": {
         "tags": [
           "AI-Context"
         ],
         "description": "",
+        "parameters": [
+          {
+            "name": "contextId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
         "responses": {
           "200": {
             "description": "OK"
@@ -1950,10 +821,24 @@
           "400": {
             "description": "Bad Request"
           },
+          "401": {
+            "description": "Unauthorized"
+          },
+          "403": {
+            "description": "Forbidden"
+          },
+          "404": {
+            "description": "Not Found"
+          },
           "500": {
             "description": "Internal Server Error"
           }
-        }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ]
       }
     },
     "/ai/context/upload-file": {
@@ -2204,9 +1089,6 @@
           "401": {
             "description": "Unauthorized"
           },
-          "402": {
-            "description": "Payment Required"
-          },
           "403": {
             "description": "Forbidden"
           },
@@ -2334,255 +1216,6 @@
         }
       }
     },
-    "/ai/profile/{profileId}/access": {
-      "post": {
-        "tags": [
-          "Access"
-        ],
-        "description": "Grant access to a memory profile for one or more users. Supports batch invites. Returns 207 on partial success.",
-        "parameters": [
-          {
-            "name": "profileId",
-            "in": "path",
-            "required": true,
-            "schema": {
-              "type": "string"
-            }
-          }
-        ],
-        "responses": {
-          "400": {
-            "description": "Bad Request"
-          },
-          "401": {
-            "description": "Unauthorized"
-          },
-          "403": {
-            "description": "Forbidden"
-          },
-          "404": {
-            "description": "Not Found"
-          },
-          "500": {
-            "description": "Internal Server Error"
-          }
-        },
-        "security": [
-          {
-            "bearerAuth": []
-          }
-        ],
-        "requestBody": {
-          "required": true,
-          "content": {
-            "application/json": {
-              "schema": {
-                "type": "object",
-                "properties": {
-                  "shares": {
-                    "type": "array",
-                    "items": {
-                      "type": "object",
-                      "properties": {
-                        "identifier": {
-                          "type": "string",
-                          "description": "Email or wallet address"
-                        },
-                        "identifierType": {
-                          "type": "string",
-                          "enum": [
-                            "email",
-                            "wallet"
-                          ]
-                        },
-                        "role": {
-                          "type": "string",
-                          "enum": [
-                            "viewer",
-                            "editor"
-                          ]
-                        }
-                      },
-                      "required": [
-                        "identifier",
-                        "identifierType",
-                        "role"
-                      ]
-                    }
-                  }
-                },
-                "required": [
-                  "shares"
-                ]
-              }
-            }
-          }
-        }
-      },
-      "get": {
-        "tags": [
-          "Access"
-        ],
-        "description": "List all users who have access to a profile. Only the profile owner can view this.",
-        "parameters": [
-          {
-            "name": "profileId",
-            "in": "path",
-            "required": true,
-            "schema": {
-              "type": "string"
-            }
-          }
-        ],
-        "responses": {
-          "200": {
-            "description": "OK"
-          },
-          "400": {
-            "description": "Bad Request"
-          },
-          "401": {
-            "description": "Unauthorized"
-          },
-          "403": {
-            "description": "Forbidden"
-          },
-          "404": {
-            "description": "Not Found"
-          },
-          "500": {
-            "description": "Internal Server Error"
-          }
-        },
-        "security": [
-          {
-            "bearerAuth": []
-          }
-        ]
-      }
-    },
-    "/ai/profile/{profileId}/access/{accessId}": {
-      "patch": {
-        "tags": [
-          "Access"
-        ],
-        "description": "Update the role of an existing access entry. Only the profile owner can change roles.",
-        "parameters": [
-          {
-            "name": "profileId",
-            "in": "path",
-            "required": true,
-            "schema": {
-              "type": "string"
-            }
-          },
-          {
-            "name": "accessId",
-            "in": "path",
-            "required": true,
-            "schema": {
-              "type": "string"
-            }
-          }
-        ],
-        "responses": {
-          "200": {
-            "description": "OK"
-          },
-          "400": {
-            "description": "Bad Request"
-          },
-          "401": {
-            "description": "Unauthorized"
-          },
-          "403": {
-            "description": "Forbidden"
-          },
-          "404": {
-            "description": "Not Found"
-          },
-          "500": {
-            "description": "Internal Server Error"
-          }
-        },
-        "security": [
-          {
-            "bearerAuth": []
-          }
-        ],
-        "requestBody": {
-          "required": true,
-          "content": {
-            "application/json": {
-              "schema": {
-                "type": "object",
-                "properties": {
-                  "role": {
-                    "type": "string",
-                    "enum": [
-                      "viewer",
-                      "editor"
-                    ]
-                  }
-                },
-                "required": [
-                  "role"
-                ]
-              }
-            }
-          }
-        }
-      },
-      "delete": {
-        "tags": [
-          "Access"
-        ],
-        "description": "Revoke access, removing the user from the profile. Only the profile owner can revoke.",
-        "parameters": [
-          {
-            "name": "profileId",
-            "in": "path",
-            "required": true,
-            "schema": {
-              "type": "string"
-            }
-          },
-          {
-            "name": "accessId",
-            "in": "path",
-            "required": true,
-            "schema": {
-              "type": "string"
-            }
-          }
-        ],
-        "responses": {
-          "200": {
-            "description": "OK"
-          },
-          "400": {
-            "description": "Bad Request"
-          },
-          "401": {
-            "description": "Unauthorized"
-          },
-          "403": {
-            "description": "Forbidden"
-          },
-          "404": {
-            "description": "Not Found"
-          },
-          "500": {
-            "description": "Internal Server Error"
-          }
-        },
-        "security": [
-          {
-            "bearerAuth": []
-          }
-        ]
-      }
-    },
     "/ai/profile/": {
       "post": {
         "tags": [
@@ -2634,6 +1267,15 @@
           "AI-Profile"
         ],
         "description": "",
+        "parameters": [
+          {
+            "name": "includeMinted",
+            "in": "query",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
         "responses": {
           "200": {
             "description": "OK"
@@ -2656,47 +1298,6 @@
       }
     },
     "/ai/profile/{profileId}": {
-      "get": {
-        "tags": [
-          "AI-Profile"
-        ],
-        "description": "",
-        "parameters": [
-          {
-            "name": "profileId",
-            "in": "path",
-            "required": true,
-            "schema": {
-              "type": "string"
-            }
-          }
-        ],
-        "responses": {
-          "200": {
-            "description": "OK"
-          },
-          "400": {
-            "description": "Bad Request"
-          },
-          "401": {
-            "description": "Unauthorized"
-          },
-          "403": {
-            "description": "Forbidden"
-          },
-          "404": {
-            "description": "Not Found"
-          },
-          "500": {
-            "description": "Internal Server Error"
-          }
-        },
-        "security": [
-          {
-            "bearerAuth": []
-          }
-        ]
-      },
       "put": {
         "tags": [
           "AI-Profile"
@@ -2800,345 +1401,8 @@
         ]
       }
     },
-    "/ai/profile/{profileId}/publish": {
-      "patch": {
-        "tags": [
-          "AI-Profile"
-        ],
-        "description": "",
-        "parameters": [
-          {
-            "name": "profileId",
-            "in": "path",
-            "required": true,
-            "schema": {
-              "type": "string"
-            }
-          }
-        ],
-        "responses": {
-          "200": {
-            "description": "OK"
-          },
-          "400": {
-            "description": "Bad Request"
-          },
-          "401": {
-            "description": "Unauthorized"
-          },
-          "403": {
-            "description": "Forbidden"
-          },
-          "404": {
-            "description": "Not Found"
-          },
-          "500": {
-            "description": "Internal Server Error"
-          }
-        },
-        "security": [
-          {
-            "bearerAuth": []
-          }
-        ],
-        "requestBody": {
-          "content": {
-            "application/json": {
-              "schema": {
-                "type": "object",
-                "properties": {
-                  "published": {
-                    "example": "any"
-                  }
-                }
-              }
-            }
-          }
-        }
-      }
-    },
-    "/ai/profile/{profileId}/pin": {
-      "patch": {
-        "tags": [
-          "AI-Profile"
-        ],
-        "description": "",
-        "parameters": [
-          {
-            "name": "profileId",
-            "in": "path",
-            "required": true,
-            "schema": {
-              "type": "string"
-            }
-          }
-        ],
-        "responses": {
-          "200": {
-            "description": "OK"
-          },
-          "400": {
-            "description": "Bad Request"
-          },
-          "401": {
-            "description": "Unauthorized"
-          },
-          "403": {
-            "description": "Forbidden"
-          },
-          "404": {
-            "description": "Not Found"
-          },
-          "500": {
-            "description": "Internal Server Error"
-          }
-        },
-        "security": [
-          {
-            "bearerAuth": []
-          }
-        ],
-        "requestBody": {
-          "content": {
-            "application/json": {
-              "schema": {
-                "type": "object",
-                "properties": {
-                  "isPinned": {
-                    "example": "any"
-                  }
-                }
-              }
-            }
-          }
-        }
-      }
-    },
-    "/ai/activity/profile/{profileId}": {
-      "get": {
-        "tags": [
-          "Activity"
-        ],
-        "description": "Get paginated activity log for a profile. Requires viewer+ access.",
-        "parameters": [
-          {
-            "name": "profileId",
-            "in": "path",
-            "required": true,
-            "schema": {
-              "type": "string"
-            }
-          },
-          {
-            "name": "page",
-            "in": "query",
-            "schema": {
-              "type": "string"
-            }
-          },
-          {
-            "name": "limit",
-            "in": "query",
-            "schema": {
-              "type": "string"
-            }
-          }
-        ],
-        "responses": {
-          "200": {
-            "description": "OK"
-          },
-          "400": {
-            "description": "Bad Request"
-          },
-          "401": {
-            "description": "Unauthorized"
-          },
-          "403": {
-            "description": "Forbidden"
-          },
-          "404": {
-            "description": "Not Found"
-          },
-          "500": {
-            "description": "Internal Server Error"
-          }
-        },
-        "security": [
-          {
-            "bearerAuth": []
-          }
-        ]
-      }
-    },
-    "/ai/notifications/": {
-      "get": {
-        "tags": [
-          "Notifications"
-        ],
-        "description": "List notifications for the authenticated user. Supports pagination and unread-only filter.",
-        "parameters": [
-          {
-            "name": "page",
-            "in": "query",
-            "schema": {
-              "type": "string"
-            }
-          },
-          {
-            "name": "limit",
-            "in": "query",
-            "schema": {
-              "type": "string"
-            }
-          },
-          {
-            "name": "unreadOnly",
-            "in": "query",
-            "schema": {
-              "type": "string"
-            }
-          }
-        ],
-        "responses": {
-          "200": {
-            "description": "OK"
-          },
-          "401": {
-            "description": "Unauthorized"
-          },
-          "403": {
-            "description": "Forbidden"
-          },
-          "500": {
-            "description": "Internal Server Error"
-          }
-        },
-        "security": [
-          {
-            "bearerAuth": []
-          }
-        ]
-      }
-    },
-    "/ai/notifications/read-all": {
-      "patch": {
-        "tags": [
-          "Notifications"
-        ],
-        "description": "",
-        "responses": {
-          "200": {
-            "description": "OK"
-          },
-          "401": {
-            "description": "Unauthorized"
-          },
-          "403": {
-            "description": "Forbidden"
-          },
-          "500": {
-            "description": "Internal Server Error"
-          }
-        },
-        "security": [
-          {
-            "bearerAuth": []
-          }
-        ]
-      }
-    },
-    "/ai/notifications/{id}/read": {
-      "patch": {
-        "tags": [
-          "Notifications"
-        ],
-        "description": "",
-        "parameters": [
-          {
-            "name": "id",
-            "in": "path",
-            "required": true,
-            "schema": {
-              "type": "string"
-            }
-          }
-        ],
-        "responses": {
-          "200": {
-            "description": "OK"
-          },
-          "400": {
-            "description": "Bad Request"
-          },
-          "401": {
-            "description": "Unauthorized"
-          },
-          "403": {
-            "description": "Forbidden"
-          },
-          "404": {
-            "description": "Not Found"
-          },
-          "500": {
-            "description": "Internal Server Error"
-          }
-        },
-        "security": [
-          {
-            "bearerAuth": []
-          }
-        ]
-      }
-    },
-    "/ai/notifications/{id}": {
-      "delete": {
-        "tags": [
-          "Notifications"
-        ],
-        "description": "",
-        "parameters": [
-          {
-            "name": "id",
-            "in": "path",
-            "required": true,
-            "schema": {
-              "type": "string"
-            }
-          }
-        ],
-        "responses": {
-          "200": {
-            "description": "OK"
-          },
-          "400": {
-            "description": "Bad Request"
-          },
-          "401": {
-            "description": "Unauthorized"
-          },
-          "403": {
-            "description": "Forbidden"
-          },
-          "404": {
-            "description": "Not Found"
-          },
-          "500": {
-            "description": "Internal Server Error"
-          }
-        },
-        "security": [
-          {
-            "bearerAuth": []
-          }
-        ]
-      }
-    },
     "/mcp/semantic-search": {
       "post": {
-        "tags": [
-          "MCP"
-        ],
         "description": "",
         "responses": {
           "200": {
@@ -3150,9 +1414,6 @@
           "401": {
             "description": "Unauthorized"
           },
-          "402": {
-            "description": "Payment Required"
-          },
           "403": {
             "description": "Forbidden"
           },
@@ -3160,11 +1421,6 @@
             "description": "Internal Server Error"
           }
         },
-        "security": [
-          {
-            "bearerAuth": []
-          }
-        ],
         "requestBody": {
           "content": {
             "application/json": {
@@ -3187,38 +1443,50 @@
         }
       }
     },
-    "/subscription/status": {
+    "/blockchain/contract-info": {
       "get": {
-        "tags": [
-          "Subscription"
-        ],
         "description": "",
         "responses": {
           "200": {
             "description": "OK"
           },
-          "401": {
-            "description": "Unauthorized"
+          "500": {
+            "description": "Internal Server Error"
           },
-          "403": {
-            "description": "Forbidden"
+          "503": {
+            "description": "Service Unavailable"
+          }
+        }
+      }
+    },
+    "/blockchain/metadata/bucket/{profileId}": {
+      "get": {
+        "description": "",
+        "parameters": [
+          {
+            "name": "profileId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK"
+          },
+          "404": {
+            "description": "Not Found"
           },
           "500": {
             "description": "Internal Server Error"
           }
-        },
-        "security": [
-          {
-            "bearerAuth": []
-          }
-        ]
+        }
       }
     },
-    "/subscription/preview-change": {
+    "/blockchain/upload-cover": {
       "post": {
-        "tags": [
-          "Subscription"
-        ],
         "description": "",
         "responses": {
           "200": {
@@ -3237,18 +1505,13 @@
             "description": "Internal Server Error"
           }
         },
-        "security": [
-          {
-            "bearerAuth": []
-          }
-        ],
         "requestBody": {
           "content": {
             "application/json": {
               "schema": {
                 "type": "object",
                 "properties": {
-                  "targetPlanType": {
+                  "image": {
                     "example": "any"
                   }
                 }
@@ -3258,12 +1521,45 @@
         }
       }
     },
-    "/subscription/upgrade": {
-      "post": {
-        "tags": [
-          "Subscription"
-        ],
+    "/blockchain/metadata/context/{contextId}": {
+      "get": {
         "description": "",
+        "parameters": [
+          {
+            "name": "contextId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK"
+          },
+          "404": {
+            "description": "Not Found"
+          },
+          "500": {
+            "description": "Internal Server Error"
+          }
+        }
+      }
+    },
+    "/blockchain/mint/{profileId}/prepare-registration": {
+      "post": {
+        "description": "",
+        "parameters": [
+          {
+            "name": "profileId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
         "responses": {
           "200": {
             "description": "OK"
@@ -3282,23 +1578,59 @@
           },
           "500": {
             "description": "Internal Server Error"
+          },
+          "503": {
+            "description": "Service Unavailable"
           }
-        },
-        "security": [
+        }
+      }
+    },
+    "/blockchain/mint/{profileId}/confirm-registration": {
+      "post": {
+        "description": "",
+        "parameters": [
           {
-            "bearerAuth": []
+            "name": "profileId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
           }
         ],
+        "responses": {
+          "200": {
+            "description": "OK"
+          },
+          "400": {
+            "description": "Bad Request"
+          },
+          "401": {
+            "description": "Unauthorized"
+          },
+          "403": {
+            "description": "Forbidden"
+          },
+          "409": {
+            "description": "Conflict"
+          },
+          "500": {
+            "description": "Internal Server Error"
+          },
+          "503": {
+            "description": "Service Unavailable"
+          }
+        },
         "requestBody": {
           "content": {
             "application/json": {
               "schema": {
                 "type": "object",
                 "properties": {
-                  "planType": {
+                  "txHash": {
                     "example": "any"
                   },
-                  "customerEmail": {
+                  "contextIds": {
                     "example": "any"
                   }
                 }
@@ -3308,16 +1640,177 @@
         }
       }
     },
-    "/subscription/verify-payment": {
-      "get": {
-        "tags": [
-          "Subscription"
-        ],
+    "/blockchain/mint/{profileId}/prepare-mint": {
+      "post": {
         "description": "",
         "parameters": [
           {
-            "name": "session_id",
-            "in": "query",
+            "name": "profileId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK"
+          },
+          "400": {
+            "description": "Bad Request"
+          },
+          "401": {
+            "description": "Unauthorized"
+          },
+          "403": {
+            "description": "Forbidden"
+          },
+          "409": {
+            "description": "Conflict"
+          },
+          "500": {
+            "description": "Internal Server Error"
+          },
+          "503": {
+            "description": "Service Unavailable"
+          }
+        }
+      }
+    },
+    "/blockchain/mint/{profileId}/confirm-mint": {
+      "post": {
+        "description": "",
+        "parameters": [
+          {
+            "name": "profileId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK"
+          },
+          "202": {
+            "description": "Accepted"
+          },
+          "400": {
+            "description": "Bad Request"
+          },
+          "401": {
+            "description": "Unauthorized"
+          },
+          "403": {
+            "description": "Forbidden"
+          },
+          "409": {
+            "description": "Conflict"
+          },
+          "500": {
+            "description": "Internal Server Error"
+          },
+          "503": {
+            "description": "Service Unavailable"
+          }
+        },
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "txHash": {
+                    "example": "any"
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/blockchain/mint/{profileId}/cancel": {
+      "post": {
+        "description": "",
+        "parameters": [
+          {
+            "name": "profileId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK"
+          },
+          "401": {
+            "description": "Unauthorized"
+          },
+          "403": {
+            "description": "Forbidden"
+          },
+          "409": {
+            "description": "Conflict"
+          },
+          "500": {
+            "description": "Internal Server Error"
+          }
+        }
+      }
+    },
+    "/blockchain/my-nfts": {
+      "get": {
+        "description": "",
+        "responses": {
+          "200": {
+            "description": "OK"
+          },
+          "401": {
+            "description": "Unauthorized"
+          },
+          "403": {
+            "description": "Forbidden"
+          },
+          "500": {
+            "description": "Internal Server Error"
+          }
+        }
+      }
+    },
+    "/blockchain/acquired-nfts": {
+      "get": {
+        "description": "",
+        "responses": {
+          "200": {
+            "description": "OK"
+          },
+          "401": {
+            "description": "Unauthorized"
+          },
+          "403": {
+            "description": "Forbidden"
+          },
+          "500": {
+            "description": "Internal Server Error"
+          }
+        }
+      }
+    },
+    "/blockchain/list/{tokenId}": {
+      "post": {
+        "description": "",
+        "parameters": [
+          {
+            "name": "tokenId",
+            "in": "path",
+            "required": true,
             "schema": {
               "type": "string"
             }
@@ -3343,23 +1836,164 @@
             "description": "Internal Server Error"
           }
         },
-        "security": [
-          {
-            "bearerAuth": []
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "txHash": {
+                    "example": "any"
+                  }
+                }
+              }
+            }
           }
-        ]
+        }
       }
     },
-    "/subscription/webhook": {
+    "/blockchain/delist/{tokenId}": {
       "post": {
-        "tags": [
-          "Subscription"
-        ],
         "description": "",
         "parameters": [
           {
-            "name": "stripe-signature",
-            "in": "header",
+            "name": "tokenId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK"
+          },
+          "400": {
+            "description": "Bad Request"
+          },
+          "401": {
+            "description": "Unauthorized"
+          },
+          "403": {
+            "description": "Forbidden"
+          },
+          "404": {
+            "description": "Not Found"
+          },
+          "500": {
+            "description": "Internal Server Error"
+          }
+        },
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "txHash": {
+                    "example": "any"
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/blockchain/buy/{tokenId}": {
+      "post": {
+        "description": "",
+        "parameters": [
+          {
+            "name": "tokenId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK"
+          },
+          "400": {
+            "description": "Bad Request"
+          },
+          "401": {
+            "description": "Unauthorized"
+          },
+          "403": {
+            "description": "Forbidden"
+          },
+          "404": {
+            "description": "Not Found"
+          },
+          "500": {
+            "description": "Internal Server Error"
+          }
+        },
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "txHash": {
+                    "example": "any"
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/blockchain/history/{tokenId}": {
+      "get": {
+        "description": "",
+        "parameters": [
+          {
+            "name": "tokenId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK"
+          },
+          "500": {
+            "description": "Internal Server Error"
+          }
+        }
+      }
+    },
+    "/blockchain/marketplace/listings": {
+      "get": {
+        "description": "",
+        "responses": {
+          "200": {
+            "description": "OK"
+          },
+          "500": {
+            "description": "Internal Server Error"
+          }
+        }
+      }
+    },
+    "/blockchain/marketplace/listings/{tokenId}": {
+      "get": {
+        "description": "",
+        "parameters": [
+          {
+            "name": "tokenId",
+            "in": "path",
+            "required": true,
             "schema": {
               "type": "string"
             }
@@ -3378,42 +2012,41 @@
         }
       }
     },
-    "/subscription/payment-history": {
+    "/blockchain/verify/{contextId}": {
       "get": {
-        "tags": [
-          "Subscription"
-        ],
         "description": "",
+        "parameters": [
+          {
+            "name": "contextId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
         "responses": {
           "200": {
             "description": "OK"
           },
-          "401": {
-            "description": "Unauthorized"
-          },
-          "403": {
-            "description": "Forbidden"
+          "404": {
+            "description": "Not Found"
           },
           "500": {
             "description": "Internal Server Error"
+          },
+          "503": {
+            "description": "Service Unavailable"
           }
-        },
-        "security": [
-          {
-            "bearerAuth": []
-          }
-        ]
+        }
       }
     },
-    "/subscription/cancel": {
+    "/pat/tokens/": {
       "post": {
-        "tags": [
-          "Subscription"
-        ],
         "description": "",
         "responses": {
-          "200": {
-            "description": "OK"
+          "201": {
+            "description": "Created"
           },
           "400": {
             "description": "Bad Request"
@@ -3424,29 +2057,45 @@
           "403": {
             "description": "Forbidden"
           },
-          "409": {
-            "description": "Conflict"
+          "429": {
+            "description": "Too Many Requests"
           },
           "500": {
             "description": "Internal Server Error"
           }
         },
-        "security": [
-          {
-            "bearerAuth": []
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "name": {
+                    "example": "any"
+                  },
+                  "expiresIn": {
+                    "example": "any"
+                  },
+                  "scopes": {
+                    "example": "any"
+                  }
+                }
+              }
+            }
           }
-        ]
-      }
-    },
-    "/subscription/plans": {
+        }
+      },
       "get": {
-        "tags": [
-          "Subscription"
-        ],
         "description": "",
         "responses": {
           "200": {
             "description": "OK"
+          },
+          "401": {
+            "description": "Unauthorized"
+          },
+          "403": {
+            "description": "Forbidden"
           },
           "500": {
             "description": "Internal Server Error"
@@ -3454,40 +2103,40 @@
         }
       }
     },
-    "/appsumo/webhook": {
-      "post": {
-        "tags": [
-          "AppSumo"
-        ],
+    "/pat/tokens/{id}": {
+      "delete": {
         "description": "",
         "parameters": [
           {
-            "name": "x-appsumo-timestamp",
-            "in": "header",
-            "schema": {
-              "type": "string"
-            }
-          },
-          {
-            "name": "x-appsumo-signature",
-            "in": "header",
+            "name": "id",
+            "in": "path",
+            "required": true,
             "schema": {
               "type": "string"
             }
           }
         ],
         "responses": {
-          "200": {
-            "description": "OK"
+          "204": {
+            "description": "No Content"
+          },
+          "401": {
+            "description": "Unauthorized"
+          },
+          "403": {
+            "description": "Forbidden"
+          },
+          "404": {
+            "description": "Not Found"
+          },
+          "500": {
+            "description": "Internal Server Error"
           }
         }
       }
     },
-    "/appsumo/oauth/callback": {
+    "/pat/tokens/verify": {
       "get": {
-        "tags": [
-          "AppSumo"
-        ],
         "description": "",
         "parameters": [
           {
@@ -3496,115 +2145,8 @@
             "schema": {
               "type": "string"
             }
-          },
-          {
-            "name": "code",
-            "in": "query",
-            "schema": {
-              "type": "string"
-            }
           }
         ],
-        "responses": {
-          "0": {
-            "description": ""
-          },
-          "1": {
-            "description": ""
-          },
-          "2": {
-            "description": ""
-          },
-          "5": {
-            "description": ""
-          },
-          "200": {
-            "description": "OK"
-          }
-        }
-      }
-    },
-    "/appsumo/activate": {
-      "post": {
-        "tags": [
-          "AppSumo"
-        ],
-        "description": "",
-        "responses": {
-          "200": {
-            "description": "OK"
-          },
-          "400": {
-            "description": "Bad Request"
-          },
-          "401": {
-            "description": "Unauthorized"
-          },
-          "403": {
-            "description": "Forbidden"
-          },
-          "404": {
-            "description": "Not Found"
-          },
-          "409": {
-            "description": "Conflict"
-          },
-          "500": {
-            "description": "Internal Server Error"
-          }
-        },
-        "security": [
-          {
-            "bearerAuth": []
-          }
-        ]
-      }
-    },
-    "/appsumo/license-check": {
-      "get": {
-        "tags": [
-          "AppSumo"
-        ],
-        "description": "",
-        "parameters": [
-          {
-            "name": "licenseKey",
-            "in": "query",
-            "schema": {
-              "type": "string"
-            }
-          }
-        ],
-        "responses": {
-          "200": {
-            "description": "OK"
-          },
-          "400": {
-            "description": "Bad Request"
-          },
-          "401": {
-            "description": "Unauthorized"
-          },
-          "403": {
-            "description": "Forbidden"
-          },
-          "500": {
-            "description": "Internal Server Error"
-          }
-        },
-        "security": [
-          {
-            "bearerAuth": []
-          }
-        ]
-      }
-    },
-    "/appsumo/status": {
-      "get": {
-        "tags": [
-          "AppSumo"
-        ],
-        "description": "",
         "responses": {
           "200": {
             "description": "OK"
@@ -3612,72 +2154,8 @@
           "401": {
             "description": "Unauthorized"
           },
-          "403": {
-            "description": "Forbidden"
-          },
           "500": {
             "description": "Internal Server Error"
-          }
-        },
-        "security": [
-          {
-            "bearerAuth": []
-          }
-        ]
-      }
-    },
-    "/appsumo/review-prompt": {
-      "post": {
-        "tags": [
-          "AppSumo"
-        ],
-        "description": "",
-        "responses": {
-          "200": {
-            "description": "OK"
-          },
-          "400": {
-            "description": "Bad Request"
-          },
-          "401": {
-            "description": "Unauthorized"
-          },
-          "403": {
-            "description": "Forbidden"
-          },
-          "404": {
-            "description": "Not Found"
-          },
-          "500": {
-            "description": "Internal Server Error"
-          }
-        },
-        "security": [
-          {
-            "bearerAuth": []
-          }
-        ],
-        "requestBody": {
-          "content": {
-            "application/json": {
-              "schema": {
-                "type": "object",
-                "properties": {
-                  "action": {
-                    "example": "any"
-                  },
-                  "rating": {
-                    "example": "any"
-                  },
-                  "feedback": {
-                    "example": "any"
-                  },
-                  "clickedReview": {
-                    "example": "any"
-                  }
-                }
-              }
-            }
           }
         }
       }

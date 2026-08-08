@@ -7,10 +7,8 @@ import { In } from 'typeorm';
 import { UserAiProfile } from '../../ai-service/entity/user-ai-profile';
 import { UserContext } from '../../ai-service/entity/user-context';
 import { NftListing } from '../entity/nft-listing';
-import { resolveProfileAccess } from '../../ai-service/utils/permission';
 import { computeFromProfile as previewBucketHash } from '../../ai-service/utils/bucket-hash';
 import { invalidateWallet as invalidateWalletNftCache, walletToBucketHashes } from '../utils/wallet-nfts';
-import { logActivity } from '../../ai-service/utils/activity';
 import { getContractClient } from '../utils/contract-client';
 import { hashContent } from '../utils/hash-utils';
 import Logger from '../../../lib/logger';
@@ -144,24 +142,6 @@ blockchainRouter.get('/contract-info', async (req: Request, res: Response) => {
 });
 
 /**
- * GET /blockchain/mint-fee
- * Get current mint fee.
- */
-blockchainRouter.get('/mint-fee', async (req: Request, res: Response) => {
-  try {
-    const client = getContractClient();
-    if (!client.isConfigured()) {
-      return res.status(503).json({ error: 'Blockchain service not configured' });
-    }
-    const fee = await client.getMintFee();
-    return res.status(200).json({ mintFee: fee });
-  } catch (error: any) {
-    Logger.error('Failed to get mint fee:', error);
-    return res.status(500).json({ error: 'Failed to get mint fee' });
-  }
-});
-
-/**
  * GET /blockchain/metadata/bucket/:profileId
  * Public NFT metadata endpoint. On-chain tokenURI points here. Returns
  * OpenSea-style JSON describing the (immutable) bucket — name, description,
@@ -249,6 +229,14 @@ blockchainRouter.get('/metadata/context/:contextId', async (req: Request, res: R
 
     const context = await userContextRepository.findOne({ where: { contextId } });
     if (!context) {
+      return res.status(404).json({ error: 'Context not found' });
+    }
+
+    // Same gate as the bucket-metadata route: only contexts belonging to a
+    // frozen/minted bucket are public. Contexts in editable drafts would leak
+    // titles/filenames of private work-in-progress to anyone with the UUID.
+    const profile = await userAiProfileRepository.findOne({ where: { id: context.profileId } });
+    if (!profile || !profile.isImmutable) {
       return res.status(404).json({ error: 'Context not found' });
     }
 
@@ -657,12 +645,6 @@ blockchainRouter.post('/mint/:profileId/confirm-mint', isAuthenticated, async (r
 
     if (authAddress) invalidateWalletNftCache(authAddress);
 
-    logActivity(profileId, userId as string, 'bucket_minted', {
-      targetType: 'profile',
-      targetId: profileId,
-      metadata: { tokenId, txHash, bucketHash: profile.bucketHash, chain: 'oasis-sapphire-testnet' },
-    });
-
     return res.status(200).json({ status: 'minted', tokenId, txHash, bucketHash: profile.bucketHash });
   } catch (error: any) {
     Logger.error('Failed to confirm mint:', error);
@@ -712,113 +694,6 @@ blockchainRouter.post('/mint/:profileId/cancel', isAuthenticated, async (req: Re
   } catch (error: any) {
     Logger.error('Failed to cancel mint:', error);
     return res.status(500).json({ error: 'Failed to cancel mint' });
-  }
-});
-
-/**
- * GET /blockchain/mint/:profileId/status
- *   - not_minted: draft, no on-chain state
- *   - frozen:     prepared for registration (isImmutable=true), tx1 not landed
- *   - registered: tx1 confirmed (contexts on-chain), awaiting tx2
- *   - minted:     tx2 confirmed (NFT exists)
- */
-blockchainRouter.get('/mint/:profileId/status', isAuthenticated, async (req: Request, res: Response) => {
-  try {
-    const { profileId } = req.params;
-    const profile = await userAiProfileRepository.findOne({ where: { id: profileId } });
-    if (!profile) return res.status(404).json({ error: 'Profile not found' });
-
-    if (profile.mintedTokenId) {
-      return res.status(200).json({
-        status: 'minted',
-        tokenId: profile.mintedTokenId,
-        txHash: profile.mintTxHash,
-        bucketHash: profile.bucketHash,
-        mintedAt: profile.mintedAt?.toISOString(),
-      });
-    }
-    if (!profile.isImmutable) {
-      return res.status(200).json({ status: 'not_minted' });
-    }
-    // Frozen → check whether tx1 (registration) already landed. Source of
-    // truth is registeredOnChain flags on user_context (set by
-    // /confirm-registration). If the flags are still false but the chain
-    // actually has the registration, self-heal here so the UI can advance
-    // to "Resume mint" without a manual recovery step.
-    let bucketHash: string | null = profile.bucketHash || null;
-    let allRegistered =
-      !!bucketHash &&
-      (await userContextRepository.count({
-        where: { profileId, registeredOnChain: false },
-      })) === 0;
-
-    if (!allRegistered) {
-      // Self-heal probe. Two stuck states we want to recover from:
-      //   (a) bucketHash IS persisted but registeredOnChain flags weren't
-      //       flipped (confirm-registration never landed).
-      //   (b) bucketHash is NULL because a prior prepare-registration save
-      //       raced and nuked it. The bucket is isImmutable=true here so
-      //       recomputing from contents gives the EXACT hash tx1 would have
-      //       used — content can't have changed.
-      // In both cases, a non-zero on-chain registrant proves tx1 landed.
-      try {
-        const client = getContractClient();
-        if (client.isConfigured()) {
-          if (!bucketHash) {
-            bucketHash = await previewBucketHash(profileId);
-          }
-          if (bucketHash) {
-            const registrant = await client.getBucketRegistrant(bucketHash);
-            if (registrant !== '0x0000000000000000000000000000000000000000') {
-              // Persist a missing bucketHash so prepare-mint / confirm-mint
-              // can use it without re-probing.
-              if (!profile.bucketHash) {
-                profile.bucketHash = bucketHash;
-                await userAiProfileRepository.save(profile);
-              }
-              // Mark every still-unmarked context as on-chain.
-              await userContextRepository.update({ profileId, registeredOnChain: false }, { registeredOnChain: true });
-              allRegistered = true;
-            }
-          }
-        }
-      } catch (err) {
-        Logger.warn(`[status] self-heal probe failed for ${profileId}:`, err);
-      }
-    }
-
-    return res.status(200).json({
-      status: allRegistered ? 'registered' : 'frozen',
-      bucketHash,
-    });
-  } catch (error: any) {
-    Logger.error('Failed to get mint status:', error);
-    return res.status(500).json({ error: 'Failed to get mint status' });
-  }
-});
-
-/**
- * GET /blockchain/my-mint-counts
- * Returns { profileId: 0|1 } per bucket the current user *created*. With
- * one-mint-per-bucket the count is always 0 or 1; map shape kept for caller
- * compatibility (Studio's mint counter chip).
- */
-blockchainRouter.get('/my-mint-counts', isAuthenticated, async (req: Request, res: Response) => {
-  try {
-    const userId = req?.user?.id;
-    if (!userId) return res.status(401).json({ error: 'unauthenticated' });
-    const minted = await userAiProfileRepository
-      .createQueryBuilder('p')
-      .select('p.id', 'profileId')
-      .where('p.userId = :userId', { userId })
-      .andWhere('p.mintedTokenId IS NOT NULL')
-      .getRawMany();
-    const counts: Record<string, number> = {};
-    for (const r of minted) counts[r.profileId] = 1;
-    return res.status(200).json({ counts });
-  } catch (error: any) {
-    Logger.error('Failed to get mint counts:', error);
-    return res.status(500).json({ error: 'Failed to get mint counts' });
   }
 });
 
@@ -1444,45 +1319,5 @@ blockchainRouter.get('/verify/:contextId', async (req: Request, res: Response) =
   } catch (error: any) {
     Logger.error('Failed to verify content:', error);
     return res.status(500).json({ error: 'Failed to verify content' });
-  }
-});
-
-/**
- * GET /blockchain/bucket/:profileId/on-chain
- * Get on-chain data for a bucket.
- */
-blockchainRouter.get('/bucket/:profileId/on-chain', isAuthenticated, async (req: Request, res: Response) => {
-  try {
-    const { profileId } = req.params;
-
-    const client = getContractClient();
-    if (!client.isConfigured()) {
-      return res.status(503).json({ error: 'Blockchain service not configured' });
-    }
-
-    // One token per bucket — read directly from the profile.
-    const profile = await userAiProfileRepository.findOne({
-      where: { id: profileId },
-      select: ['mintedTokenId', 'mintTxHash', 'mintedAt', 'bucketHash'],
-    });
-    if (!profile?.mintedTokenId) {
-      return res.status(200).json({ minted: false, mintCount: 0 });
-    }
-    return res.status(200).json({
-      minted: true,
-      mintCount: 1,
-      latestTokenId: profile.mintedTokenId,
-      bucketHash: profile.bucketHash,
-      mints: [
-        {
-          tokenId: profile.mintedTokenId,
-          txHash: profile.mintTxHash,
-          mintedAt: profile.mintedAt?.toISOString(),
-        },
-      ],
-    });
-  } catch (error: any) {
-    Logger.error('Failed to get on-chain data:', error);
-    return res.status(500).json({ error: 'Failed to get on-chain data' });
   }
 });

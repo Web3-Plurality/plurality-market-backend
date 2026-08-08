@@ -43,7 +43,7 @@ jobs:
           echo "Verifying that pre-release image exists: ${{ env.PRE_IMAGE }}"
           docker manifest inspect ${{ env.PRE_IMAGE }} > /dev/null 2>&1 || {
             echo "Error: Pre-release image ${{ env.PRE_IMAGE }} does not exist!"
-            echo "Available tags can be viewed at: https://github.com/orgs/Web3-Plurality/packages?repo_name=plurality-backend-api"
+            echo "Available tags can be viewed at: https://github.com/orgs/Web3-Plurality/packages?repo_name=plurality-market-backend"
             exit 1
           }
           echo "Pre-release image verified successfully"

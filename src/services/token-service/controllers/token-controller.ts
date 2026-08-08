@@ -2,7 +2,6 @@ import express, { Request, Response } from 'express';
 import { IsNull, MoreThan } from 'typeorm';
 import { AppDataSource } from '../../../data-source';
 import Logger from '../../../lib/logger';
-import { authAttempts } from '../../../lib/metrics';
 import { isAuthenticated } from '../../user-service/middlewares/auth-middleware';
 import { PersonalAccessToken } from '../entity/personal-access-token';
 import { generateToken, hashToken, verifyTokenHash, isPatToken } from '../utils/token-utils';
@@ -29,7 +28,6 @@ function activeFilter(userId: string) {
   return {
     userId,
     revokedAt: IsNull(),
-    rotatedToId: IsNull(),
   };
 }
 
@@ -151,7 +149,6 @@ tokenRouter.get('/', isAuthenticated, async (req: Request, res: Response) => {
         lastUsedAt: t.lastUsedAt,
         expiresAt: t.expiresAt,
         revokedAt: t.revokedAt,
-        rotatedToId: t.rotatedToId,
         status: deriveStatus(t, now),
       })),
     );
@@ -161,8 +158,7 @@ tokenRouter.get('/', isAuthenticated, async (req: Request, res: Response) => {
   }
 });
 
-function deriveStatus(t: PersonalAccessToken, now: Date): 'active' | 'expired' | 'revoked' | 'rotated' {
-  if (t.rotatedToId) return 'rotated';
+function deriveStatus(t: PersonalAccessToken, now: Date): 'active' | 'expired' | 'revoked' {
   if (t.revokedAt) return 'revoked';
   if (t.expiresAt && t.expiresAt < now) return 'expired';
   return 'active';
@@ -194,105 +190,33 @@ tokenRouter.delete('/:id', isAuthenticated, async (req: Request, res: Response) 
   }
 });
 
-// ── POST /pat/tokens/:id/rotate ── issue replacement, schedule old to revoke
-tokenRouter.post('/:id/rotate', isAuthenticated, async (req: Request, res: Response) => {
-  try {
-    const userId = req.user?.id;
-    if (!userId) return res.status(401).json({ error: 'unauthenticated' });
-
-    const { id } = req.params;
-    const gracePeriodDaysRaw = req.body?.gracePeriodDays;
-    const gracePeriodDays =
-      typeof gracePeriodDaysRaw === 'number' && gracePeriodDaysRaw >= 0 && gracePeriodDaysRaw <= 30
-        ? gracePeriodDaysRaw
-        : 7;
-
-    const result = await AppDataSource.transaction(async (manager) => {
-      const repo = manager.getRepository(PersonalAccessToken);
-      const oldToken = await repo.findOne({ where: { id, userId } });
-      if (!oldToken) return { status: 404 as const };
-      if (oldToken.revokedAt) return { status: 409 as const, error: 'already_revoked' };
-      if (oldToken.rotatedToId) return { status: 409 as const, error: 'already_rotated' };
-
-      const { plaintext, prefix, hash } = generateToken();
-      const newToken = repo.create({
-        userId,
-        authAddress: oldToken.authAddress,
-        tokenHash: hash,
-        tokenPrefix: prefix,
-        name: oldToken.name,
-        scopes: oldToken.scopes,
-        expiresAt: oldToken.expiresAt,
-        createdIp: getClientIp(req),
-      });
-      const savedNew = await repo.save(newToken);
-
-      const graceEnd = new Date();
-      graceEnd.setDate(graceEnd.getDate() + gracePeriodDays);
-      oldToken.rotatedToId = savedNew.id;
-      oldToken.revokedAt = graceEnd;
-      await repo.save(oldToken);
-
-      return { status: 201 as const, plaintext, saved: savedNew };
-    });
-
-    if (result.status === 404) {
-      return res.status(404).json({ error: 'token_not_found' });
-    }
-    if (result.status === 409) {
-      return res.status(409).json({ error: result.error });
-    }
-
-    Logger.info(`[PAT] Rotated token ${id} → ${result.saved.id} (grace ${gracePeriodDays}d) for user ${userId}`);
-    return res.status(201).json({
-      id: result.saved.id,
-      token: result.plaintext,
-      name: result.saved.name,
-      tokenPrefix: result.saved.tokenPrefix,
-      scopes: result.saved.scopes,
-      expiresAt: result.saved.expiresAt,
-      createdAt: result.saved.createdAt,
-      gracePeriodDays,
-    });
-  } catch (err) {
-    Logger.error('[PAT] Failed to rotate token', err);
-    return res.status(500).json({ error: 'internal_error' });
-  }
-});
-
 // ── GET /pat/tokens/verify ── internal endpoint used by MCP server
 tokenRouter.get('/verify', async (req: Request, res: Response) => {
   try {
     const auth = req.headers.authorization || '';
     if (!auth.startsWith('Bearer ')) {
-      authAttempts.inc({ method: 'pat', status: 'failure' });
       return res.status(401).json({ error: 'missing_or_malformed_authorization' });
     }
     const plaintext = auth.slice(7).trim();
     if (!isPatToken(plaintext)) {
-      authAttempts.inc({ method: 'pat', status: 'failure' });
       return res.status(401).json({ error: 'not_a_pat' });
     }
 
     const hash = hashToken(plaintext);
     const token = await tokenRepository.findOne({ where: { tokenHash: hash } });
     if (!token) {
-      authAttempts.inc({ method: 'pat', status: 'failure' });
       return res.status(401).json({ error: 'invalid_token' });
     }
 
     const now = new Date();
     if (token.revokedAt && token.revokedAt <= now) {
-      authAttempts.inc({ method: 'pat', status: 'failure' });
       return res.status(401).json({ error: 'revoked' });
     }
     if (token.expiresAt && token.expiresAt < now) {
-      authAttempts.inc({ method: 'pat', status: 'failure' });
       return res.status(401).json({ error: 'expired' });
     }
 
     if (!verifyTokenHash(plaintext, token.tokenHash)) {
-      authAttempts.inc({ method: 'pat', status: 'failure' });
       return res.status(401).json({ error: 'invalid_token' });
     }
 
@@ -300,7 +224,6 @@ tokenRouter.get('/verify', async (req: Request, res: Response) => {
       .update(token.id, { lastUsedAt: now, lastUsedIp: getClientIp(req) })
       .catch((err) => Logger.warn(`[PAT] Failed to update last_used for ${token.id}: ${err.message}`));
 
-    authAttempts.inc({ method: 'pat', status: 'success' });
     return res.json({
       // Wallet address is the canonical identifier downstream (MCP server
       // stamps it into a ContextVar, backend uses it for NFT-derived
@@ -312,7 +235,6 @@ tokenRouter.get('/verify', async (req: Request, res: Response) => {
     });
   } catch (err) {
     Logger.error('[PAT] Failed to verify token', err);
-    authAttempts.inc({ method: 'pat', status: 'failure' });
     return res.status(500).json({ error: 'internal_error' });
   }
 });

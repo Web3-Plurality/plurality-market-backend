@@ -6,11 +6,9 @@ import { ethers } from 'ethers';
 import jwt from 'jsonwebtoken';
 import { LoginType, User } from '../../user-service/entity/user';
 import { AppDataSource } from '../../../data-source';
-import { AddUserSession, ensureChatEncKey } from '../utils/user';
 import { setAuthCookie, clearAuthCookie } from '../utils/cookie';
 import { isAuthenticated } from '../../user-service/middlewares/auth-middleware';
 import * as dotenv from 'dotenv';
-import { userOperations, authAttempts } from '../../../lib/metrics';
 
 dotenv.config();
 
@@ -37,7 +35,6 @@ const userRegisterViaWallet = async (address: string) => {
       await userRepository.save(existingUser);
       Logger.info(`[SIWE] Upgraded stub user ${existingUser.id} to metamask login`);
     }
-    authAttempts.inc({ method: 'siwe', status: 'success' });
   } else {
     // Race-safe insert: two concurrent SIWE calls for the same wallet could
     // both miss the existing-user check above and try to insert. If a
@@ -46,13 +43,10 @@ const userRegisterViaWallet = async (address: string) => {
     try {
       const newUser = userRepository.create({
         authAddress: normalizedAddress,
-        subscribe: false,
         loginType: LoginType.metamask,
       });
       addedUser = await userRepository.save(newUser);
       Logger.info(`new user created with address: ${normalizedAddress}`);
-      userOperations.inc({ operation: 'signup', status: 'success' });
-      authAttempts.inc({ method: 'siwe', status: 'success' });
     } catch (err) {
       // Unique-violation from the functional index — another request won.
       existingUser = await findUserByLoweredAddress(normalizedAddress);
@@ -61,13 +55,10 @@ const userRegisterViaWallet = async (address: string) => {
         throw err;
       }
       Logger.info(`[SIWE] Insert raced; using existing user ${existingUser.id}`);
-      authAttempts.inc({ method: 'siwe', status: 'success' });
     }
   }
 
   const userId = existingUser?.id ? existingUser?.id : addedUser?.id;
-  await AddUserSession(userId); // login audit row; id is no longer embedded in the JWT
-  const chatEncKey = await ensureChatEncKey(userId);
   // Wallet address is the canonical identifier across the stack. `id` is
   // carried alongside as a denormalized perf shortcut so protected routes
   // can read `req.user.id` without a User-table lookup per request.
@@ -75,7 +66,7 @@ const userRegisterViaWallet = async (address: string) => {
     expiresIn: process.env.JWT_EXPIRY,
   });
   Logger.info(`jwt token generated for wallet ${normalizedAddress} (user ${userId})`);
-  return { token, user: existingUser?.id ? existingUser : addedUser, chatEncKey };
+  return { token, user: existingUser?.id ? existingUser : addedUser };
 };
 
 //generate random string to take user signature
@@ -172,16 +163,14 @@ authSiweRouter.post('/authenticate', async function (req: Request, res: Response
     }
     // create jwt token
     Logger.info(`user authenticated successfully by address ${address}`);
-    const { token, user, chatEncKey } = await userRegisterViaWallet(address);
+    const { token, user } = await userRegisterViaWallet(address);
 
     // Set JWT as HttpOnly cookie (primary auth for web app)
     setAuthCookie(res, token);
 
-    return res.status(200).json({ success: true, token, user, chatEncKey });
+    return res.status(200).json({ success: true, token, user });
   } catch (err) {
     Logger.error(`Error occurred: ${err}`);
-    // Track failed authentication attempt
-    authAttempts.inc({ method: 'siwe', status: 'error' });
     res.status(401).send('Authentication failed');
   }
 });
@@ -206,8 +195,7 @@ authSiweRouter.get('/session', isAuthenticated, async (req: Request, res: Respon
     if (!userId || !authAddress) {
       return res.status(401).json({ success: false });
     }
-    const chatEncKey = await ensureChatEncKey(userId);
-    return res.status(200).json({ success: true, userId, authAddress, chatEncKey });
+    return res.status(200).json({ success: true, userId, authAddress });
   } catch (err) {
     Logger.error(`[siwe/session] error: ${err}`);
     return res.status(500).json({ success: false });
