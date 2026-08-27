@@ -1,0 +1,54 @@
+node_modules
+local-certificates
+logs
+*.log
+.github
+*.env
+.husky
+.vscode
+dist
+testing
+
+# Git files
+.git
+.gitignore
+.gitattributes
+
+# Documentation and notes
+*.md
+README.md
+NOTES.md
+
+# IDE and editor files
+.idea
+*.swp
+*.swo
+*~
+
+# Cache and temporary files
+.cache
+.eslintcache
+*.tmp
+*.temp
+
+# Test files
+*.test.js
+*.test.ts
+*.spec.js
+*.spec.ts
+__tests__
+coverage
+
+# Build artifacts
+artifacts
+cache
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Docker files (no need to copy these into the image)
+Dockerfile
+.dockerignore
+docker-compose.yml
+docker-compose.*.yml
