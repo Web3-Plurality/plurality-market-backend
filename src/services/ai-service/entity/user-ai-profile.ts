@@ -61,6 +61,11 @@ export class UserAiProfile {
   @Column({ type: 'varchar', length: 500, nullable: true })
   nftCoverImage: string | null;
 
+  // Marketplace category (OpenSea-style browse filter). One key from the
+  // fixed list shared with the frontend; validated in sanitizeMintMetadata.
+  @Column({ type: 'varchar', length: 40, nullable: true })
+  nftCategory: string | null;
+
   // ── Marketplace state (mirrors on-chain listing for fast queries) ──
   // Authoritative source is on-chain; these are denormalized from /list,
   // /delist, /buy after verifyTxEvent confirms the action.

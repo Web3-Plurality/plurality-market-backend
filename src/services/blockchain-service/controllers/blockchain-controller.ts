@@ -29,17 +29,35 @@ function clampString(val: unknown, max: number): string | null {
   return trimmed.slice(0, max);
 }
 
+// Marketplace browse taxonomy. Mirror of CATEGORIES in
+// plurality-market-place/src/components/marketplace/categories.ts — keep in sync.
+const ALLOWED_CATEGORIES = new Set([
+  'research',
+  'business',
+  'tech',
+  'finance',
+  'education',
+  'creative',
+  'health',
+  'lifestyle',
+  'personal',
+  'other',
+]);
+
 function sanitizeMintMetadata(body: any): {
   title: string | null;
   tagline: string | null;
   description: string | null;
   coverImage: string | null;
+  category: string | null;
 } {
+  const rawCategory = typeof body?.category === 'string' ? body.category.trim().toLowerCase() : '';
   return {
     title: clampString(body?.title, 120),
     tagline: clampString(body?.tagline, 280),
     description: clampString(body?.description, 5000),
     coverImage: clampString(body?.coverImage, 500),
+    category: ALLOWED_CATEGORIES.has(rawCategory) ? rawCategory : null,
   };
 }
 
@@ -173,11 +191,16 @@ blockchainRouter.get('/metadata/bucket/:profileId', async (req: Request, res: Re
     // bucketHash stays in `properties` as the verification anchor for
     // HTTP-only consumers that don't want to make an RPC call for
     // `tokenToBucketHash(tokenId)`.
+    const attributes: Array<{ trait_type: string; value: string | number }> = [
+      { trait_type: 'Contexts', value: contextCount },
+    ];
+    if (profile.nftCategory) attributes.push({ trait_type: 'Category', value: profile.nftCategory });
+
     return res.status(200).json({
       name,
       description,
       image,
-      attributes: [{ trait_type: 'Contexts', value: contextCount }],
+      attributes,
       properties: {
         bucketHash: profile.bucketHash,
         mintedAt: profile.mintedAt?.toISOString(),
@@ -381,6 +404,7 @@ blockchainRouter.post('/mint/:profileId/prepare-registration', isAuthenticated, 
     profile.nftTagline = meta.tagline;
     profile.nftDescription = meta.description;
     profile.nftCoverImage = meta.coverImage || profile.image || null;
+    profile.nftCategory = meta.category ?? null;
     profile.bucketHash = bucketHash;
     profile.isImmutable = true;
     await userAiProfileRepository.save(profile);
@@ -907,6 +931,7 @@ function serializeBucketAsNft(p: UserAiProfile, contextCount = 0) {
     tagline: p.nftTagline,
     description: p.nftDescription,
     coverImage: p.nftCoverImage,
+    category: p.nftCategory ?? null,
     bucketHash: p.bucketHash,
     metadataURI: buildBucketMetadataURI(p.id),
     mintTxHash: p.mintTxHash,

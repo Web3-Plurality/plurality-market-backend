@@ -20,6 +20,28 @@ export const contextRouter = express.Router();
 const userContextRepository = AppDataSource.getRepository(UserContext);
 const userAiProfileRepository = AppDataSource.getRepository(UserAiProfile);
 
+// The AI service returns "untitled" (or nothing) when its LLM title pass
+// fails — outage, quota, or a parse miss on the model's output. Rather than
+// surface that literal to the user, fall back to the first meaningful line
+// of the text itself.
+function isUsableTitle(t: unknown): t is string {
+  return typeof t === 'string' && t.trim().length > 0 && t.trim().toLowerCase() !== 'untitled';
+}
+
+function deriveTitleFromText(text: string): string {
+  const firstLine = (text || '')
+    .split(/\r?\n/)
+    .map((l) =>
+      l
+        .replace(/^[#>*\-\s]+/, '')
+        .replace(/\s+/g, ' ')
+        .trim(),
+    )
+    .find((l) => l.length > 0);
+  if (!firstLine) return 'untitled';
+  return firstLine.length > 60 ? `${firstLine.slice(0, 57)}…` : firstLine;
+}
+
 // Fire-and-forget wrapper: a hash recompute failure must never break the
 // user-facing add/delete. The bucketHash is rebuildable from user_context
 // at any time, so logging is sufficient. Immutability is enforced by the
@@ -204,14 +226,15 @@ contextRouter.post('/add-raw-context', isAuthenticatedNativeOrMcp('mcp:tools'), 
     }
 
     // Step 3: Update context with response data and COMPLETED status
-    userContext.title = customTitle || response?.data?.extractedTitle || 'untitled';
+    const extractedTitle = response?.data?.extractedTitle;
+    userContext.title = customTitle || (isUsableTitle(extractedTitle) ? extractedTitle : deriveTitleFromText(context));
     userContext.description = response?.data?.extractedDescription || '';
     userContext.vectorIds = response?.data?.vectorIds || [];
     userContext.status = ContextStatus.COMPLETED;
     await userContextRepository.save(userContext);
 
     if (profile.profileName === 'untitled' || profile.profileName === '') {
-      profile.profileName = customTitle || response?.data?.extractedTitle || 'untitled';
+      profile.profileName = userContext.title;
       await userAiProfileRepository.save(profile);
     }
 
@@ -345,7 +368,7 @@ contextRouter.post(
         sourceType: 'chat',
         sourcePlatform: platform || 'unknown',
         contentSize,
-          contentHash: hashContent(JSON.stringify(chatHistory)), // SHA-256 for on-chain provenance
+        contentHash: hashContent(JSON.stringify(chatHistory)), // SHA-256 for on-chain provenance
       });
       await userContextRepository.save(userContext);
       refreshBucketHash(profile.id);
