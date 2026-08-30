@@ -4,9 +4,13 @@ on:
   workflow_dispatch:
     inputs:
       version:
-        description: 'Version to promote (e.g., 1.31.0). Leave empty to use latest-pre version.'
+        description: 'Version to promote (e.g., 1.31.0). Leave empty to use the latest git tag.'
         required: false
         type: string
+
+permissions:
+  contents: read
+  packages: write        # push images to ghcr.io
 
 jobs:
   semantic_release:
@@ -18,12 +22,12 @@ jobs:
           sudo rm -rf /usr/share/dotnet /usr/local/lib/android
 
       - name: Docker Login
-        run: docker login --username ${{ secrets.GHCR_USERNAME }} --password ${{ secrets.GHCR_TOKEN }} ghcr.io
+        run: echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io --username ${{ github.actor }} --password-stdin
 
       - name: Checkout code
-        uses: actions/checkout@v2
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # v4.4.0
         with:
-          token: ${{ secrets.GHCR_TOKEN }}
+          fetch-depth: 0   # tags needed for git describe
 
       - name: Determine Version to Promote
         id: determine_version
@@ -32,8 +36,9 @@ jobs:
             VERSION="${{ github.event.inputs.version }}"
             echo "Using manually specified version: $VERSION"
           else
-            VERSION=$(jq -r '.version' package.json)
-            echo "Using version from package.json: $VERSION"
+            VERSION=$(git describe --tags --abbrev=0)
+            VERSION=${VERSION#v}
+            echo "Using latest git tag: $VERSION"
           fi
           echo "VERSION=$VERSION" >> $GITHUB_ENV
           echo "PRE_IMAGE=ghcr.io/web3-plurality/plurality-market-backend-pre:$VERSION" >> $GITHUB_ENV
