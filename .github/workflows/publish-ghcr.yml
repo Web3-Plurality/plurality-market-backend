@@ -3,10 +3,14 @@ name: Semantic Release Docker
 on:
   push:
     branches: [ "main" ]
-  release:
-    types: [created]
   workflow_dispatch:
   
+permissions:
+  contents: write        # semantic-release pushes version commit + tag
+  packages: write        # push images to ghcr.io
+  issues: write          # semantic-release release comments
+  pull-requests: write   # semantic-release release comments
+
 jobs:
   semantic_release:
     runs-on: ubuntu-latest
@@ -22,15 +26,15 @@ jobs:
           git config --global user.name "semantic-release-bot"
 
       - name: Docker Login
-        run: docker login --username ${{ secrets.GHCR_USERNAME }} --password ${{ secrets.GHCR_TOKEN }} ghcr.io
+        run: echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io --username ${{ github.actor }} --password-stdin
 
       - name: Checkout code
-        uses: actions/checkout@v2
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # v4.4.0
         with:
-          token: ${{ secrets.GHCR_TOKEN }}
+          fetch-depth: 0
 
       - name: Set up Node.js
-        uses: actions/setup-node@v2
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020  # v4.4.0
         with:
           node-version: 20
 
@@ -38,6 +42,26 @@ jobs:
         run: npm install
 
       - name: Semantic Release
+        id: release
         run: npx semantic-release
         env:
-          GITHUB_TOKEN: ${{ secrets.GHCR_TOKEN }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      # The version bump goes to main through a PR instead of a direct push,
+      # so main stays PR-protected and no bypass credential is needed.
+      - name: Open version-bump PR
+        if: steps.release.outputs.version != ''
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          V: ${{ steps.release.outputs.version }}
+        run: |
+          git checkout -b "release/v$V"
+          for f in package.json package-lock.json; do
+            if [ -e "$f" ]; then git add -- "$f"; fi
+          done
+          if git diff --cached --quiet; then echo "Nothing to bump"; exit 0; fi
+          git commit -m "chore(release): $V [skip ci]"
+          git push origin "release/v$V"
+          gh pr create --base main --head "release/v$V" \
+            --title "chore(release): $V [skip ci]" \
+            --body "Version bump for release v$V, opened automatically by the release workflow. Squash-merge it; the [skip ci] in the title prevents a re-run."
