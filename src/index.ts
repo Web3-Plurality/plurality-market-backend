@@ -14,6 +14,7 @@ import { userAccountRouter } from './services/user-service/controllers/user-acco
 // ai service routers
 import { contextRouter } from './services/ai-service/controllers/context-controller';
 import { profileRouter } from './services/ai-service/controllers/profile-controller';
+import { skillRouter } from './services/ai-service/controllers/skill-controller';
 import { mcpRouter } from './services/ai-service/controllers/mcp-controller';
 // token service router (PATs)
 import { tokenRouter } from './services/token-service/controllers/token-controller';
@@ -45,6 +46,9 @@ app.use('/user/account', userAccountRouter);
 // ai service router
 app.use('/ai/context', contextRouter);
 app.use('/ai/profile', profileRouter);
+// skill router: /ai/profile/:profileId/skill (GET / PUT / DELETE). Separate
+// router so profileRouter's /:profileId handlers stay untouched.
+app.use('/ai/profile', skillRouter);
 
 // mcp router (semantic-search proxy used by the MCP server's search_memory tool)
 app.use('/mcp', mcpRouter);
