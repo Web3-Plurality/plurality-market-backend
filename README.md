@@ -1,11 +1,11 @@
 # Plurality Market Backend
 
-REST API for the Plurality Market stack. Serves the Marketplace UI (Studio + C2C + Talk-to-Memory), fronts the MCP server's PAT verification, and proxies vector / LLM calls to the AI service. Talks to:
+REST API for the Plurality Skills Marketplace stack. Serves the Marketplace UI (Studio + C2C + Use a Skill), fronts the MCP server's PAT verification, and proxies vector / LLM calls to the AI service. Talks to:
 
-- **Postgres** — users, memory buckets, contexts, PATs, NFT bookkeeping
-- **Oasis Sapphire Testnet** — read-only for NFT-ownership-based access checks
-- **`plurality-market-ai-service`** (port `8001`) — vector store + LLM
-- **`plurality-market-mcp`** (port `5051`) — forwards PAT verify requests here
+- **Postgres**: users, Skills (memory buckets), contexts, PATs, NFT bookkeeping
+- **Oasis Sapphire Testnet**: read-only for NFT-ownership-based access checks
+- **`plurality-market-ai-service`** (port `8001`): vector store + LLM
+- **`plurality-market-mcp`** (port `5051`): forwards PAT verify requests here
 
 ## Prerequisites
 
@@ -13,7 +13,7 @@ REST API for the Plurality Market stack. Serves the Marketplace UI (Studio + C2C
 - Reachable Postgres (`DB_HOST`/`DB_USER`/`DB_NAME`/`DB_PASSWORD` in `.env`)
 - A running `plurality-market-ai-service` at `AI_SERVICE_URL` (default `http://localhost:8001`)
 
-The backend never signs transactions — all on-chain writes are prepared as calldata and signed by the user's wallet in the browser, so no backend wallet key is needed.
+The backend never signs transactions: all on-chain writes are prepared as calldata and signed by the user's wallet in the browser, so no backend wallet key is needed.
 
 ## Setup
 
@@ -22,7 +22,7 @@ npm install
 cp .env.example .env   # if a fresh checkout
 ```
 
-Fill in `.env` — at minimum:
+Fill in `.env`, at minimum:
 
 ```env
 PORT=5001
@@ -79,7 +79,7 @@ docker build -t plurality-market-backend .
 docker run -p 5001:5001 --env-file .env plurality-market-backend
 ```
 
-The container expects the same `.env` shape as local. Postgres / AI service / RPC URLs must be reachable from inside the container — use `host.docker.internal` (Docker Desktop) or a shared compose network for siblings on the same host.
+The container expects the same `.env` shape as local. Postgres / AI service / RPC URLs must be reachable from inside the container: use `host.docker.internal` (Docker Desktop) or a shared compose network for siblings on the same host.
 
 ## Common entry points
 
@@ -87,11 +87,38 @@ The container expects the same `.env` shape as local. Postgres / AI service / RP
 |---|---|
 | `/auth/siwe/*` | Sign-In-With-Ethereum (the only auth surface used by the market UI) |
 | `/pat/tokens` | Mint / list / revoke Personal Access Tokens for the MCP server |
-| `/pat/tokens/verify` | Called by the MCP server on every request — verifies the bearer PAT and returns the owner's wallet + scopes |
-| `/ai/profile` | Memory-bucket (AI profile) CRUD |
+| `/pat/tokens/verify` | Called by the MCP server on every request; verifies the bearer PAT and returns the owner's wallet + scopes |
+| `/ai/profile` | Skill / memory-bucket (AI profile) CRUD |
+| `/ai/profile/:profileId/skill` | Skill instructions for one bucket (GET for creator or NFT holder, PUT / DELETE for the creator of a draft) |
 | `/ai/context` | Per-bucket context CRUD (proxied through to the AI service) |
 | `/mcp/semantic-search` | MCP tool's search endpoint (PAT-gated) |
-| `/blockchain/*` | Read-only NFT-ownership lookups (cached) |
+| `/blockchain/*` | Mint / list / buy flows, public NFT metadata, read-only NFT-ownership lookups (cached) |
+
+## Skills
+
+A **Skill** is what the marketplace sells: *instructions* (a markdown playbook telling an agent how to behave) plus *memory* (the bucket's contexts: files, notes, chats). One bucket holds at most one skill and the skill is optional. A bucket without a custom skill still works: the API serves the built-in default skill ("Knowledge assistant", see `src/services/ai-service/utils/default-skill.ts`) flagged `isDefault: true`, and the marketplace shows it as "Knowledge only". Minting never requires a skill.
+
+### Endpoints
+
+| Method | Path | Auth | Notes |
+|---|---|---|---|
+| `GET` | `/ai/profile/:profileId/skill` | session cookie or PAT (`mcp:tools`) | Creator of a draft or any wallet holding the NFT. Returns `hasSkill`, `isDefault`, `name`, `summary`, `instructions`, `skillHash`, `skillContextId`, `registeredOnChain`, `updatedAt`, `isImmutable` and a `memoryIndex` (completed contexts, max 50). Falls back to the default skill when none is set. |
+| `PUT` | `/ai/profile/:profileId/skill` | session cookie | Creator only, drafts only. Body `{ name, summary?, instructions }`: name 1 to 80 chars, summary up to 280, instructions 1 to 20000 chars of markdown. Responds with the same shape as GET. |
+| `DELETE` | `/ai/profile/:profileId/skill` | session cookie | Creator only, drafts only. Clears the skill; the bucket falls back to the default skill. 204. |
+| `GET` | `/blockchain/metadata/skill/:profileId` | public | Metadata the on-chain skill entry points to: `{ name, description, properties: { skillHash, skillContextId, bucketHash } }`. 404 until the bucket is frozen. |
+
+Editing or deleting a skill on a minted bucket returns `403 { error: "bucket_immutable" }`, the same rule contexts follow.
+
+Visibility: `skillName` and `skillSummary` are public (they appear in `GET /ai/profile`, in the NFT serializers and in the tokenURI metadata). `skillInstructions` are never included in a list or public metadata response; only `GET /ai/profile/:profileId/skill` returns them, gated by `resolveProfileAccess`.
+
+### Hashing and on-chain registration
+
+- Instructions are normalized (CRLF to LF, trimmed) and hashed with SHA-256 into `skillHash` (`0x` + 64 hex).
+- `bucketHash` = SHA-256 of `[skillHash (if present), ...contextHashes]` in `(createdAt ASC, contextId ASC)` order. A bucket without a skill hashes exactly as before, so existing hashes and NFTs are unaffected.
+- `skillContextId` is a UUID assigned on the first save and never rotated. At `POST /blockchain/mint/:profileId/prepare-registration` the skill is placed as the **first** item of the `registerContextBatch` call with `sourceType = "skill"` and a metadata URI of `/blockchain/metadata/skill/:profileId`. `confirm-registration` verifies it through `ContextRegistry.verifyContent` and sets `skillRegisteredOnChain`.
+- The bucket tokenURI (`/blockchain/metadata/bucket/:profileId`) gains a `Skill` attribute plus `skillHash` / `skillContextId` properties when a skill is present.
+
+No contract changes were needed: the registry already accepts arbitrary source types.
 
 ## License
 

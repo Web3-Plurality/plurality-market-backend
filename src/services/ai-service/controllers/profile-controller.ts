@@ -3,7 +3,8 @@ import dotenv from 'dotenv';
 import { isAuthenticated, isAuthenticatedNativeOrMcp } from '../../user-service/middlewares/auth-middleware';
 import axios from 'axios';
 import { AppDataSource } from '../../../data-source';
-import { UserContext } from '../entity/user-context';
+import { UserContext, ContextStatus } from '../entity/user-context';
+import { failStaleContexts } from '../utils/stale-contexts';
 import { UserAiProfile } from '../entity/user-ai-profile';
 import Logger from '../../../lib/logger';
 import { v2 as cloudinary } from 'cloudinary';
@@ -160,13 +161,33 @@ profileRouter.get('/', isAuthenticatedNativeOrMcp('mcp:tools'), async (req: Requ
     }
 
     const combined = [...drafts, ...mintedHeld];
+    // Flip contexts stuck "inprogress" to failed before counting, so a lost
+    // webhook cannot hold the mint gate (or the 5s polling) hostage forever.
+    if (userId) await failStaleContexts({ userId });
+
+    // processingCount / errorCount let the Studio gate the Mint button:
+    // a bucket is only mintable once every context is fully indexed.
     const ownedWithCounts = await Promise.all(
       combined.map(async (profile) => {
-        const contextCount = await userContextRepository.count({ where: { profileId: profile.id } });
+        const [contextCount, processingCount, errorCount] = await Promise.all([
+          userContextRepository.count({ where: { profileId: profile.id } }),
+          userContextRepository.count({ where: { profileId: profile.id, status: ContextStatus.IN_PROGRESS } }),
+          userContextRepository.count({ where: { profileId: profile.id, status: ContextStatus.ERROR } }),
+        ]);
+        // Skill instructions are never part of a list response: only the
+        // public name + summary travel here. Full text is served by
+        // GET /ai/profile/:profileId/skill behind the access check.
+        // eslint-disable-next-line @typescript-eslint/no-unused-vars
+        const { skillInstructions, ...publicProfile } = profile;
         return {
-          ...profile,
+          ...publicProfile,
           contextCount,
+          processingCount,
+          errorCount,
           isOwner: true,
+          hasSkill: !!profile.skillHash,
+          skillName: profile.skillName ?? null,
+          skillSummary: profile.skillSummary ?? null,
         };
       }),
     );
@@ -205,7 +226,7 @@ profileRouter.put('/:profileId', isAuthenticated, async (req: Request, res: Resp
     if (profile.isImmutable) {
       return res.status(403).json({
         error: 'bucket_immutable',
-        message: 'Cannot rename a minted bucket — its presentation is frozen on chain.',
+        message: 'Cannot rename a minted bucket. Its presentation is frozen on chain.',
       });
     }
 
@@ -286,7 +307,7 @@ profileRouter.delete('/:profileId', isAuthenticated, async (req: Request, res: R
       // lose access permanently with no recovery). Hard-block.
       return res.status(403).json({
         error: 'bucket_immutable',
-        message: 'Cannot delete a minted bucket — the on-chain NFT still references its contents.',
+        message: 'Cannot delete a minted bucket. The on-chain NFT still references its contents.',
       });
     }
 

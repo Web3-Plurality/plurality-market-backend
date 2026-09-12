@@ -72,6 +72,16 @@ export class UserAiProfile {
   @Column({ type: 'boolean', default: false })
   listingActive: boolean;
 
+  // Team curation: pins this bucket to the homepage hero slider. Only
+  // settable through PUT /blockchain/marketplace/featured/:profileId, which
+  // is gated by the ADMIN_WALLETS env allowlist. featuredAt orders the
+  // slider (most recently featured first).
+  @Column({ type: 'boolean', default: false })
+  featured: boolean;
+
+  @Column({ type: 'timestamptz', nullable: true })
+  featuredAt: Date | null;
+
   @Column({ type: 'varchar', length: 78, nullable: true })
   listingPrice: string | null; // wei as decimal string
 
@@ -82,4 +92,36 @@ export class UserAiProfile {
   // the chain events without scanning logs (Sapphire log queries are limited).
   @Column({ type: 'jsonb', nullable: true })
   transactionHashes: string[] | null;
+
+  // ── Skill (optional, one per bucket) ────────────────────────────────
+  // A Skill is a markdown playbook telling an agent how to use this bucket's
+  // memory. name + summary are public (cards, tokenURI); instructions are
+  // only readable by the creator and by wallets holding the NFT. Frozen at
+  // mint together with the contexts. A bucket without a skill falls back to
+  // the built-in default skill (see utils/default-skill.ts).
+  @Column({ type: 'varchar', length: 80, nullable: true })
+  skillName: string | null;
+
+  @Column({ type: 'varchar', length: 280, nullable: true })
+  skillSummary: string | null;
+
+  // Markdown, max 20_000 chars (enforced by the API, not the column).
+  @Column({ type: 'text', nullable: true })
+  skillInstructions: string | null;
+
+  // hashContent(normalizedInstructions): "0x" + 64 hex. Folded into
+  // bucketHash as the FIRST element when present.
+  @Column({ type: 'varchar', length: 66, nullable: true })
+  skillHash: string | null;
+
+  // uuidv4 assigned on the first skill save and STABLE afterwards. It is the
+  // on-chain contextId the skill is registered under (sourceType 'skill').
+  @Column({ type: 'uuid', nullable: true })
+  skillContextId: string | null;
+
+  @Column({ type: 'boolean', default: false })
+  skillRegisteredOnChain: boolean;
+
+  @Column({ type: 'timestamptz', nullable: true })
+  skillUpdatedAt: Date | null;
 }

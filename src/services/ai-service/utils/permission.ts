@@ -84,7 +84,7 @@ export async function resolveProfileAccess(
 
   // Minted path: chain-of-truth via NFT holdership.
   if (!profile.bucketHash) {
-    Logger.warn(`[permission] minted bucket ${profileId} has no bucketHash — denying access`);
+    Logger.warn(`[permission] minted bucket ${profileId} has no bucketHash; denying access`);
     return NO_ACCESS;
   }
   const held = await walletToBucketHashes(authAddress);

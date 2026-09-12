@@ -6,7 +6,7 @@ const RANDOM_BYTES = 32;
 
 const HMAC_PEPPER = process.env.PAT_HMAC_PEPPER || '';
 if (!HMAC_PEPPER) {
-  Logger.warn('[token-utils] PAT_HMAC_PEPPER env var is not set — set this to a strong random secret in production');
+  Logger.warn('[token-utils] PAT_HMAC_PEPPER env var is not set. Set this to a strong random secret in production');
 }
 
 export interface GeneratedToken {

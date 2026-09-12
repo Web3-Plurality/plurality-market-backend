@@ -6,8 +6,10 @@ import { ethers } from 'ethers';
 import jwt from 'jsonwebtoken';
 import { LoginType, User } from '../../user-service/entity/user';
 import { AppDataSource } from '../../../data-source';
-import { setAuthCookie, clearAuthCookie } from '../utils/cookie';
+import { setAuthCookie, clearAuthCookie, COOKIE_NAME } from '../utils/cookie';
 import { isAuthenticated } from '../../user-service/middlewares/auth-middleware';
+import { isAdminWallet } from '../../user-service/utils/admin-wallets';
+import { revokeAutoTokensForUser } from '../../token-service/utils/auto-pat';
 import * as dotenv from 'dotenv';
 
 dotenv.config();
@@ -177,8 +179,21 @@ authSiweRouter.post('/authenticate', async function (req: Request, res: Response
 
 // POST /auth/siwe/logout — clear the HttpOnly auth cookie.
 // Always returns 200 even if there was no cookie; logout shouldn't error.
-authSiweRouter.post('/logout', (_req: Request, res: Response) => {
+authSiweRouter.post('/logout', async (req: Request, res: Response) => {
   // #swagger.tags = ['Auth']
+  // Best-effort: if the cookie still decodes, kill the user's auto chat
+  // tokens so a token lifted from a browser tab stops working the moment
+  // they log out. Never fail logout over this — no middleware, no throw.
+  try {
+    const raw = req.cookies?.[COOKIE_NAME];
+    if (raw) {
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const payload = jwt.verify(raw, process.env.JWT_SECRET || '') as any;
+      if (payload?.id) await revokeAutoTokensForUser(payload.id);
+    }
+  } catch {
+    // expired / malformed cookie — nothing to revoke against
+  }
   clearAuthCookie(res);
   return res.status(200).json({ success: true });
 });
@@ -195,7 +210,10 @@ authSiweRouter.get('/session', isAuthenticated, async (req: Request, res: Respon
     if (!userId || !authAddress) {
       return res.status(401).json({ success: false });
     }
-    return res.status(200).json({ success: true, userId, authAddress });
+    // isAdmin lets the UI show team-only curation controls (e.g. the
+    // "feature on homepage" toggle). Informational only: every curation
+    // endpoint re-checks the allowlist server-side.
+    return res.status(200).json({ success: true, userId, authAddress, isAdmin: isAdminWallet(authAddress) });
   } catch (err) {
     Logger.error(`[siwe/session] error: ${err}`);
     return res.status(500).json({ success: false });
