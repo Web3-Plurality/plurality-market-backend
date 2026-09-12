@@ -14,6 +14,7 @@ import { v4 as uuidv4, validate as isValidUUID } from 'uuid';
 import { resolveProfileAccess, canEditContext, hasMinRole } from '../utils/permission';
 import { hashContent } from '../../blockchain-service/utils/hash-utils';
 import { recomputeAndStore as recomputeBucketHash } from '../utils/bucket-hash';
+import { failStaleContexts } from '../utils/stale-contexts';
 
 dotenv.config();
 export const contextRouter = express.Router();
@@ -453,6 +454,8 @@ contextRouter.get('/', isAuthenticatedNativeOrMcp('mcp:tools'), async (req: Requ
         return res.status(404).json({ error: 'Profile not found' });
       }
 
+      await failStaleContexts({ profileId: profileId as string });
+
       const contexts = await userContextRepository.find({
         where: { profileId: profileId as string },
         order: { createdAt: 'ASC' },
@@ -462,6 +465,7 @@ contextRouter.get('/', isAuthenticatedNativeOrMcp('mcp:tools'), async (req: Requ
     }
 
     // No profileId — return only the user's own contexts
+    await failStaleContexts({ userId });
     const contexts = await userContextRepository.find({
       where: { userId },
       order: { createdAt: 'ASC' },

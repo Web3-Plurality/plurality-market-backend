@@ -5,10 +5,34 @@ import Logger from '../../../lib/logger';
 import { isAuthenticated } from '../../user-service/middlewares/auth-middleware';
 import { PersonalAccessToken } from '../entity/personal-access-token';
 import { generateToken, hashToken, verifyTokenHash, isPatToken } from '../utils/token-utils';
-import { PAT_LIMIT, ALLOWED_PAT_SCOPES, AllowedPatScope } from '../utils/limits';
+import {
+  PAT_LIMIT,
+  ALLOWED_PAT_SCOPES,
+  AllowedPatScope,
+  AUTO_PAT_TTL_MS,
+  AUTO_PAT_NAME,
+  AUTO_PAT_MINTS_PER_MINUTE,
+} from '../utils/limits';
+import { revokeAutoTokensForUser, cleanupRevokedAutoTokens } from '../utils/auto-pat';
 
 export const tokenRouter = express.Router();
 const tokenRepository = AppDataSource.getRepository(PersonalAccessToken);
+
+// Per-user sliding-window counter for auto-token mints. In-memory is fine:
+// the backend is a single instance, and the worst case on restart is a
+// briefly reset window.
+const autoMintLog = new Map<string, number[]>();
+function autoMintAllowed(userId: string): boolean {
+  const now = Date.now();
+  const recent = (autoMintLog.get(userId) || []).filter((t) => now - t < 60_000);
+  if (recent.length >= AUTO_PAT_MINTS_PER_MINUTE) {
+    autoMintLog.set(userId, recent);
+    return false;
+  }
+  recent.push(now);
+  autoMintLog.set(userId, recent);
+  return true;
+}
 
 function resolveExpiresAt(expiresIn: string | undefined): Date | null {
   if (!expiresIn || expiresIn === 'never') return null;
@@ -24,9 +48,12 @@ function getClientIp(req: Request): string | null {
   return ip.length > 0 ? ip.slice(0, 45) : null;
 }
 
+// Only manual tokens count toward PAT_LIMIT — auto tokens are bounded by
+// construction (one active per user).
 function activeFilter(userId: string) {
   return {
     userId,
+    kind: 'manual' as const,
     revokedAt: IsNull(),
   };
 }
@@ -53,6 +80,48 @@ tokenRouter.post('/', isAuthenticated, async (req: Request, res: Response) => {
     const userId = req.user?.id;
     const authAddress = req.user?.authAddress;
     if (!userId || !authAddress) return res.status(401).json({ error: 'unauthenticated' });
+
+    // ── Auto token for the in-app chat ──
+    // `{ auto: true }` bypasses name/scope/expiry inputs: fixed name, mcp:tools,
+    // 1h TTL. Exactly one active auto token per user — minting revokes the
+    // previous one, so a token exfiltrated from an old tab dies on reload.
+    if (req.body?.auto === true) {
+      if (!autoMintAllowed(userId)) {
+        return res.status(429).json({
+          error: 'auto_pat_rate_limited',
+          message: 'Too many chat sessions started in a short time. Try again in a minute.',
+        });
+      }
+      await revokeAutoTokensForUser(userId);
+      void cleanupRevokedAutoTokens();
+
+      const { plaintext, prefix, hash } = generateToken();
+      const expiresAt = new Date(Date.now() + AUTO_PAT_TTL_MS);
+      const saved = await tokenRepository.save(
+        tokenRepository.create({
+          userId,
+          authAddress,
+          tokenHash: hash,
+          tokenPrefix: prefix,
+          name: AUTO_PAT_NAME,
+          kind: 'auto',
+          scopes: ['mcp:tools'],
+          expiresAt,
+          createdIp: getClientIp(req),
+        }),
+      );
+      Logger.info(`[PAT] Minted auto token ${saved.id} for wallet ${authAddress} (expires ${expiresAt.toISOString()})`);
+      return res.status(201).json({
+        id: saved.id,
+        token: plaintext,
+        name: saved.name,
+        tokenPrefix: saved.tokenPrefix,
+        scopes: saved.scopes,
+        expiresAt: saved.expiresAt,
+        createdAt: saved.createdAt,
+        kind: 'auto',
+      });
+    }
 
     const { name, expiresIn, scopes: rawScopes } = req.body || {};
     if (!name || typeof name !== 'string' || name.trim().length === 0) {
@@ -127,8 +196,9 @@ tokenRouter.get('/', isAuthenticated, async (req: Request, res: Response) => {
     const thirtyDaysAgo = new Date();
     thirtyDaysAgo.setDate(thirtyDaysAgo.getDate() - 30);
 
+    // Auto tokens are an implementation detail of the in-app chat — never listed.
     const tokens = await tokenRepository.find({
-      where: { userId },
+      where: { userId, kind: 'manual' },
       order: { createdAt: 'DESC' },
     });
 

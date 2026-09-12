@@ -11,3 +11,14 @@ export const PAT_LIMIT = 100;
 export const ALLOWED_PAT_SCOPES = ['mcp:tools', 'mcp:tools:read', 'mcp:tools:write'] as const;
 
 export type AllowedPatScope = (typeof ALLOWED_PAT_SCOPES)[number];
+
+// ── Auto tokens (in-app chat) ──────────────────────────────────────────
+// Short TTL bounds the damage of a token exfiltrated via XSS; the client
+// re-mints silently, so users never notice. Name is fixed so the row is
+// recognisable in the DB even though the UI never lists it.
+export const AUTO_PAT_TTL_MS = 60 * 60 * 1000; // 1 hour
+export const AUTO_PAT_NAME = 'In-app chat';
+// Per-user mint rate: generous for page reloads, hostile to scripted spam.
+export const AUTO_PAT_MINTS_PER_MINUTE = 10;
+// Revoked auto rows are pure noise after this — deleted opportunistically.
+export const AUTO_PAT_CLEANUP_AFTER_DAYS = 7;

@@ -29,6 +29,12 @@ export class PersonalAccessToken {
   @Column({ type: 'varchar', length: 100 })
   name: string;
 
+  // 'manual' = user-created in the API tokens dialog (long-lived, for external
+  // MCP clients). 'auto' = minted silently by the in-app chat (1h TTL, memory-
+  // only on the client, hidden from the list, revoked on logout / re-mint).
+  @Column({ type: 'varchar', length: 10, default: 'manual' })
+  kind: 'manual' | 'auto';
+
   @Column('text', { array: true, default: ['mcp:tools'] })
   scopes: string[];
 

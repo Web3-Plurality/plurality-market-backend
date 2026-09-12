@@ -2,10 +2,12 @@ import express, { Request, Response } from 'express';
 import axios from 'axios';
 import { v2 as cloudinary } from 'cloudinary';
 import { isAuthenticated } from '../../user-service/middlewares/auth-middleware';
+import { isAdminWallet } from '../../user-service/utils/admin-wallets';
 import { AppDataSource } from '../../../data-source';
 import { In } from 'typeorm';
+import { validate as isValidUUID } from 'uuid';
 import { UserAiProfile } from '../../ai-service/entity/user-ai-profile';
-import { UserContext } from '../../ai-service/entity/user-context';
+import { UserContext, ContextStatus } from '../../ai-service/entity/user-context';
 import { NftListing } from '../entity/nft-listing';
 import { computeFromProfile as previewBucketHash } from '../../ai-service/utils/bucket-hash';
 import { invalidateWallet as invalidateWalletNftCache, walletToBucketHashes } from '../utils/wallet-nfts';
@@ -92,6 +94,13 @@ const API_BASE_URL = process.env.API_BASE_URL || 'https://api.plurality.network'
 // from /mint onward, so this URL serves stable JSON.
 function buildBucketMetadataURI(profileId: string): string {
   return `${API_BASE_URL}/blockchain/metadata/bucket/${profileId}`;
+}
+
+// The skill is registered on-chain as the first item of the context batch
+// (sourceType 'skill'); its metadataURI resolves to the public skill card
+// (name + summary + hashes, never the instructions).
+function buildSkillMetadataURI(profileId: string): string {
+  return `${API_BASE_URL}/blockchain/metadata/skill/${profileId}`;
 }
 
 /**
@@ -182,8 +191,14 @@ blockchainRouter.get('/metadata/bucket/:profileId', async (req: Request, res: Re
     const contextCount = await userContextRepository.count({ where: { profileId } });
 
     const name = profile.nftTitle || profile.profileName;
+    const hasSkill = !!profile.skillHash;
+    // Prefer the creator's own description; fall back to the skill summary
+    // (public by design) before the generic placeholder.
     const description =
-      profile.nftDescription || profile.nftTagline || `Plurality Memory Bucket: ${profile.profileName}`;
+      profile.nftDescription ||
+      profile.nftTagline ||
+      (hasSkill && profile.skillSummary) ||
+      `Plurality Skill: ${profile.profileName}`;
     const image = profile.nftCoverImage || profile.image || undefined;
 
     // Trimmed: nothing here is duplicated with the caller's already-known
@@ -195,16 +210,24 @@ blockchainRouter.get('/metadata/bucket/:profileId', async (req: Request, res: Re
       { trait_type: 'Contexts', value: contextCount },
     ];
     if (profile.nftCategory) attributes.push({ trait_type: 'Category', value: profile.nftCategory });
+    if (hasSkill && profile.skillName) attributes.push({ trait_type: 'Skill', value: profile.skillName });
+
+    // Skill provenance is public (hash + on-chain id). Instructions are not.
+    const properties: Record<string, unknown> = {
+      bucketHash: profile.bucketHash,
+      mintedAt: profile.mintedAt?.toISOString(),
+    };
+    if (hasSkill) {
+      properties.skillHash = profile.skillHash;
+      properties.skillContextId = profile.skillContextId;
+    }
 
     return res.status(200).json({
       name,
       description,
       image,
       attributes,
-      properties: {
-        bucketHash: profile.bucketHash,
-        mintedAt: profile.mintedAt?.toISOString(),
-      },
+      properties,
     });
   } catch (error: any) {
     Logger.error('Failed to serve bucket metadata:', error);
@@ -239,6 +262,36 @@ blockchainRouter.post('/upload-cover', isAuthenticated, async (req: Request, res
   } catch (error: any) {
     Logger.error('Failed to upload cover image:', error);
     return res.status(500).json({ error: 'Failed to upload image' });
+  }
+});
+
+/**
+ * GET /blockchain/metadata/skill/:profileId
+ * Public metadata for the skill item registered in the ContextRegistry
+ * (the first entry of the bucket's batch, sourceType 'skill'). Only served
+ * for frozen/minted buckets that actually have a skill. Name + summary +
+ * hashes only; the instructions stay behind GET /ai/profile/:id/skill.
+ */
+blockchainRouter.get('/metadata/skill/:profileId', async (req: Request, res: Response) => {
+  try {
+    const { profileId } = req.params;
+    const profile = await userAiProfileRepository.findOne({ where: { id: profileId } });
+    if (!profile || !profile.isImmutable || !profile.skillHash) {
+      return res.status(404).json({ error: 'Skill not found' });
+    }
+
+    return res.status(200).json({
+      name: profile.skillName,
+      description: profile.skillSummary || '',
+      properties: {
+        skillHash: profile.skillHash,
+        skillContextId: profile.skillContextId,
+        bucketHash: profile.bucketHash,
+      },
+    });
+  } catch (error: any) {
+    Logger.error('Failed to serve skill metadata:', error);
+    return res.status(500).json({ error: 'Failed to serve metadata' });
   }
 });
 
@@ -360,11 +413,46 @@ blockchainRouter.post('/mint/:profileId/prepare-registration', isAuthenticated, 
     // Compute the bucketHash from current contexts WITHOUT persisting yet.
     // We need the hash for the on-chain pre-check; persisting happens in a
     // single coordinated save below so it can't race with isImmutable.
-    const bucketHash = await previewBucketHash(profileId);
-    if (!bucketHash) {
+    // A skill alone yields a bucketHash (it is the first hash element), but
+    // a Skill still needs memory behind it, so the empty guard also looks at
+    // the context count.
+    // The skill hash comes from the `profile` snapshot loaded above, the same
+    // object the batch below unshifts, so hash and registered content agree
+    // even if the creator saves the skill while this request is in flight.
+    const bucketHash = await previewBucketHash(profileId, profile.skillHash ?? null);
+    const contextTotal = await userContextRepository.count({ where: { profileId } });
+    if (!bucketHash || contextTotal === 0) {
       return res.status(400).json({
         error: 'empty_bucket',
-        message: 'Cannot mint an empty bucket — add at least one context first.',
+        message: 'Cannot mint an empty bucket. Add at least one context first.',
+      });
+    }
+
+    // Minting freezes the content hashes on-chain, so every context must be
+    // fully indexed first. The UI disables the button for these cases; this
+    // is the server-side guarantee.
+    const processing = await userContextRepository.count({
+      where: { profileId, status: ContextStatus.IN_PROGRESS },
+    });
+    if (processing > 0) {
+      return res.status(409).json({
+        error: 'contexts_processing',
+        processing,
+        message: `${processing} context${
+          processing === 1 ? ' is' : 's are'
+        } still being processed. Wait for indexing to finish before minting.`,
+      });
+    }
+    const failed = await userContextRepository.count({
+      where: { profileId, status: ContextStatus.ERROR },
+    });
+    if (failed > 0) {
+      return res.status(409).json({
+        error: 'contexts_failed',
+        failed,
+        message: `${failed} context${failed === 1 ? '' : 's'} failed to process. Delete or re-add ${
+          failed === 1 ? 'it' : 'them'
+        } before minting.`,
       });
     }
 
@@ -424,7 +512,7 @@ blockchainRouter.post('/mint/:profileId/prepare-registration', isAuthenticated, 
     for (const ctx of contexts) {
       const hash = await resolveContextHash(ctx);
       if (!hash) {
-        Logger.warn(`[prepare-registration] skipping ${ctx.contextId} — no content hash`);
+        Logger.warn(`[prepare-registration] skipping ${ctx.contextId}: no content hash`);
         continue;
       }
       contextIds.push(ctx.contextId);
@@ -434,6 +522,16 @@ blockchainRouter.post('/mint/:profileId/prepare-registration', isAuthenticated, 
     }
     if (contextIds.length === 0) {
       return res.status(400).json({ error: 'no_hashable_contexts' });
+    }
+
+    // The skill goes FIRST, mirroring its position in bucketHash. Its
+    // contextId is the stable uuid assigned on first save (bytes16 on chain)
+    // and its sourceType is 'skill' so explorers can tell it apart.
+    if (profile.skillHash && profile.skillContextId) {
+      contextIds.unshift(profile.skillContextId);
+      contentHashes.unshift(profile.skillHash);
+      metadataURIs.unshift(buildSkillMetadataURI(profileId));
+      sourceTypes.unshift('skill');
     }
 
     const { to, data } = client.prepareRegisterContextBatch(
@@ -494,7 +592,7 @@ blockchainRouter.post('/mint/:profileId/confirm-registration', isAuthenticated, 
     if (registrant === '0x0000000000000000000000000000000000000000') {
       return res.status(409).json({
         error: 'not_visible_yet',
-        message: 'Tx not visible on-chain yet — try again in a moment.',
+        message: 'Tx not visible on-chain yet. Try again in a moment.',
       });
     }
     if (!authAddress || registrant !== authAddress.toLowerCase()) {
@@ -510,6 +608,21 @@ blockchainRouter.post('/mint/:profileId/confirm-registration', isAuthenticated, 
 
     const confirmed: string[] = [];
     const pending: string[] = [];
+
+    // The skill item is not a user_context row; verify it against the
+    // registry the same way and flip skillRegisteredOnChain on success.
+    if (profile.skillContextId && contextIds.includes(profile.skillContextId)) {
+      if (profile.skillHash && (await client.verifyContent(profile.skillContextId, profile.skillHash))) {
+        if (!profile.skillRegisteredOnChain) {
+          profile.skillRegisteredOnChain = true;
+          await userAiProfileRepository.save(profile);
+        }
+        confirmed.push(profile.skillContextId);
+      } else {
+        pending.push(profile.skillContextId);
+      }
+    }
+
     for (const ctx of rows) {
       if (!ctx.contentHash) {
         pending.push(ctx.contextId);
@@ -705,7 +818,7 @@ blockchainRouter.post('/mint/:profileId/cancel', isAuthenticated, async (req: Re
         if (registrant !== '0x0000000000000000000000000000000000000000') {
           return res.status(409).json({
             error: 'already_registered',
-            message: 'Contexts already on-chain — finish minting via /prepare-mint instead of cancelling.',
+            message: 'Contexts already on-chain. Finish minting via /prepare-mint instead of cancelling.',
           });
         }
       }
@@ -945,6 +1058,16 @@ function serializeBucketAsNft(p: UserAiProfile, contextCount = 0) {
     // endpoint and threaded through here — N+1 over individual SELECT counts
     // would scale badly when a wallet holds many NFTs.
     contextCount,
+    // Skill card data. Public by design (name + summary only). The
+    // instructions are never serialized here; holders fetch them from
+    // GET /ai/profile/:profileId/skill.
+    hasSkill: !!p.skillHash,
+    skillName: p.skillHash ? p.skillName : null,
+    skillSummary: p.skillHash ? p.skillSummary : null,
+    // Team curation flag: the homepage slider shows featured buckets first,
+    // most recently featured leading. Set only by admin wallets.
+    featured: p.featured === true,
+    featuredAt: p.featuredAt ? p.featuredAt.toISOString() : null,
   };
 }
 
@@ -1249,6 +1372,65 @@ blockchainRouter.get('/marketplace/listings', async (req: Request, res: Response
   } catch (error: any) {
     Logger.error('Failed to get marketplace listings:', error);
     return res.status(500).json({ error: 'Failed to get listings' });
+  }
+});
+
+/**
+ * PUT /blockchain/marketplace/featured/:profileId  { featured: boolean }
+ * Team-only curation: pin (or unpin) a minted bucket on the homepage hero
+ * slider. Authorization is a wallet allowlist (ADMIN_WALLETS env var) checked
+ * against the SIWE session's authAddress, so it is safe on a public backend:
+ * the caller must both sign in with a listed wallet AND the list itself is
+ * config, never writable via any API.
+ *
+ * isAuthenticated = native cookie session only. PATs (including the in-app
+ * auto chat tokens) are rejected by the middleware, so a leaked MCP token can
+ * never curate the homepage.
+ *
+ * Non-admins get 404, same as a missing bucket, so the endpoint's existence
+ * is not advertised to the public.
+ */
+blockchainRouter.put('/marketplace/featured/:profileId', isAuthenticated, async (req: Request, res: Response) => {
+  try {
+    const authAddress = req.user?.authAddress;
+    if (!isAdminWallet(authAddress)) {
+      return res.status(404).json({ error: 'not_found' });
+    }
+
+    const { profileId } = req.params;
+    if (!isValidUUID(profileId)) {
+      return res.status(400).json({ error: 'Invalid Profile ID format. Expected a valid UUID.' });
+    }
+    const featured = req.body?.featured;
+    if (typeof featured !== 'boolean') {
+      return res.status(400).json({ error: 'featured must be a boolean' });
+    }
+
+    // Only minted buckets can appear on the marketplace, so only they can be
+    // featured. Drafts stay private to their creator.
+    const profile = await userAiProfileRepository.findOne({
+      where: { id: profileId, isImmutable: true },
+    });
+    if (!profile) {
+      return res.status(404).json({ error: 'not_found' });
+    }
+
+    profile.featured = featured;
+    profile.featuredAt = featured ? new Date() : null;
+    await userAiProfileRepository.save(profile);
+
+    // Audit trail: which admin wallet curated what. Ops can grep this.
+    Logger.info(`[featured] admin ${authAddress} set featured=${featured} on bucket ${profileId}`);
+
+    return res.status(200).json({
+      success: true,
+      profileId,
+      featured: profile.featured,
+      featuredAt: profile.featuredAt ? profile.featuredAt.toISOString() : null,
+    });
+  } catch (error) {
+    Logger.error('Failed to update featured flag:', error);
+    return res.status(500).json({ error: 'Failed to update featured flag' });
   }
 });
 
