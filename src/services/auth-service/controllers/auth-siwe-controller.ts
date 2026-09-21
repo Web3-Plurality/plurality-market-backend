@@ -145,14 +145,16 @@ authSiweRouter.post('/authenticate', async function (req: Request, res: Response
     const siweToken = siweObj?.siwe;
     const message = decodeURIComponent(siweObj?.message);
     const nonce = memoryStoreNonce.get(address.toLowerCase());
-    const siweMessage = new SiweMessage(message);
-    const siweResponse = await siweMessage.verify({ signature: siweToken });
-    // check nonce
+    // The stored nonce must exist AND be the one embedded in the signed
+    // message; verify() enforces the match. Without this binding any
+    // previously signed SIWE message replays forever.
     if (!nonce) {
       Logger.error(`Invalid nonce`);
       return res.status(400).send('Invalid nonce');
     }
-    // delete nonce with the address
+    const siweMessage = new SiweMessage(message);
+    const siweResponse = await siweMessage.verify({ signature: siweToken, nonce }).catch(() => ({ success: false }));
+    // Single-use: burn the nonce whether or not verification passed.
     memoryStoreNonce.delete(address.toLowerCase());
     // check signature
     if (!siweResponse.success) {
@@ -167,10 +169,12 @@ authSiweRouter.post('/authenticate', async function (req: Request, res: Response
     Logger.info(`user authenticated successfully by address ${address}`);
     const { token, user } = await userRegisterViaWallet(address);
 
-    // Set JWT as HttpOnly cookie (primary auth for web app)
+    // Set JWT as HttpOnly cookie (primary auth for web app). The token is
+    // deliberately NOT echoed in the body: page JS must never see it, or the
+    // HttpOnly protection is moot.
     setAuthCookie(res, token);
 
-    return res.status(200).json({ success: true, token, user });
+    return res.status(200).json({ success: true, user: { id: user.id, authAddress: user.authAddress } });
   } catch (err) {
     Logger.error(`Error occurred: ${err}`);
     res.status(401).send('Authentication failed');
