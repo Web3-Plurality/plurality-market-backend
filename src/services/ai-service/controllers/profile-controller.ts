@@ -49,7 +49,7 @@ export async function createProfile(userId: string, profileName: string, image: 
   // Upload an image
   if (image) {
     const uploadResult = await cloudinary.uploader.upload(image).catch((error) => {
-      console.log(error);
+      Logger.error('Cloudinary avatar upload failed (profile will be created without an image):', error);
     });
     imageUrl = uploadResult?.secure_url || '';
   }
