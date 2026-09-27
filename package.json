@@ -1,6 +1,6 @@
 {
   "name": "plurality-market-backend",
-  "version": "1.4.1",
+  "version": "1.4.2",
   "private": true,
   "main": "index.js",
   "license": "MIT",
