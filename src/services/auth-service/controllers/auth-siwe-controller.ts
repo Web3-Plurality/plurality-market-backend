@@ -129,14 +129,18 @@ authSiweRouter.post('/authenticate', async function (req: Request, res: Response
       return res.status(400).json({ error: 'Invalid wallet address' });
     }
 
-    // Validate x-siwe header
-    if (!req.headers['x-siwe']) {
+    // Validate x-siwe header. Read via req.get(), NOT req.headers['x-siwe']:
+    // swagger-autogen's source parser embeds `!req.headers['x-siwe']` into a
+    // RegExp where the bracket literal becomes a character class and "x-s" is
+    // an out-of-order range — swagger generation then crashes, and the
+    // container CMD gates the server behind it (took the deployed backend
+    // down in a restart loop).
+    const siweHeader = req.get('x-siwe');
+    if (!siweHeader) {
       return res.status(400).json({ error: 'SIWE header is required' });
     }
 
-    const siweObj = req.headers['x-siwe']
-      ? JSON.parse(Array.isArray(req.headers['x-siwe']) ? req.headers['x-siwe'][0] : req.headers['x-siwe'])
-      : '';
+    const siweObj = JSON.parse(siweHeader);
 
     if (!siweObj || !siweObj.siwe || !siweObj.message) {
       return res.status(400).json({ error: 'Invalid SIWE header format' });

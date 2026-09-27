@@ -21,10 +21,17 @@ RUN npm ci
 # Copy the rest of the application code
 COPY . ./
 
+# Fail the IMAGE BUILD if swagger generation is broken, so a parser bug
+# surfaces in CI instead of at first production boot (1.4.0/1.4.1 shipped a
+# crash that only ran at container start and 502'd the deployed backend).
+RUN npm run swagger
+
 # The HTTP server reads PORT from .env / runtime env. Default to 5001 to match
 # the rest of the market stack (UI → 5001, MCP → 5001, AI service → 5001 webhook).
 ENV PORT=5001
 EXPOSE 5001
 
 # Set the command to run the application
-CMD ["sh", "-c", "npm run swagger && npm run prod"]
+# Swagger generation must never take the API down: on failure, log and serve
+# the last committed src/swagger.json instead of crash-looping the container.
+CMD ["sh", "-c", "npm run swagger || echo '[start] swagger generation failed — serving last committed swagger.json'; npm run prod"]
