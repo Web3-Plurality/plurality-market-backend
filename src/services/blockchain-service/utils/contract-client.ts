@@ -129,7 +129,11 @@ export class ContractClient {
       if (!receipt) return null;
 
       const iface = new ethers.Interface(PluralityMemoryNFTABI as any);
+      // Only OUR contract's logs count. Without this filter any contract
+      // emitting an ABI-compatible event in the same tx would be accepted.
+      const nftAddress = String(this.memoryNFT.target).toLowerCase();
       for (const log of receipt.logs) {
+        if ((log.address || '').toLowerCase() !== nftAddress) continue;
         try {
           const parsed = iface.parseLog({ topics: log.topics as string[], data: log.data });
           if (parsed && parsed.name === 'BucketMinted') {
@@ -255,7 +259,11 @@ export class ContractClient {
 
       const iface = new ethers.Interface(PluralityMemoryNFTABI as any);
 
+      // Only OUR contract's logs count. Without this filter any contract
+      // emitting an ABI-compatible Listed/Sold event would pass verification.
+      const nftAddress = String(this.memoryNFT.target).toLowerCase();
       for (const log of receipt.logs) {
+        if ((log.address || '').toLowerCase() !== nftAddress) continue;
         try {
           const parsed = iface.parseLog({ topics: log.topics as string[], data: log.data });
           if (!parsed) continue;

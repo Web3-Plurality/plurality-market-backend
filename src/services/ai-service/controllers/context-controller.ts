@@ -345,6 +345,15 @@ contextRouter.post(
         if (!access.hasAccess || !hasMinRole(access, 'editor')) {
           return res.status(404).json({ error: 'Profile not found or insufficient permissions' });
         }
+        // Minted buckets are frozen: their bucketHash is on-chain, so adding
+        // a chat context would silently diverge content from provenance. The
+        // other add routes already carry this gate; this one was the gap.
+        if (access.isImmutable) {
+          return res.status(403).json({
+            error: 'bucket_immutable',
+            message: 'This bucket has been minted and is read-only. Save the conversation to a different bucket.',
+          });
+        }
 
         effectiveOwnerId = access.ownerId || userId;
 

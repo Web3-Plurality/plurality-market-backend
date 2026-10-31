@@ -1,9 +1,11 @@
 import express, { Request, Response } from 'express';
 import axios from 'axios';
+import { In } from 'typeorm';
 import { AppDataSource } from '../../../data-source';
 import { User } from '../entity/user';
 import { UserAiProfile } from '../../ai-service/entity/user-ai-profile';
 import { UserContext } from '../../ai-service/entity/user-context';
+import { PersonalAccessToken } from '../../token-service/entity/personal-access-token';
 import { isAuthenticated } from '../middlewares/auth-middleware';
 import { clearAuthCookie } from '../../auth-service/utils/cookie';
 import Logger from '../../../lib/logger';
@@ -63,8 +65,12 @@ userAccountRouter.delete('/', isAuthenticated, async (req: Request, res: Respons
 
     Logger.info(`[RIGHT-TO-FORGET] Initiating account deletion for user ${userId}`);
 
-    // Step 1: Fetch all user profiles to clean up vector store
-    const profiles = await userAiProfileRepository.find({ where: { userId } });
+    // Step 1: Fetch the user's DRAFT profiles only. Minted buckets are
+    // excluded on purpose: the NFT exists on-chain and may have been sold,
+    // so its content (DB rows and vectors) must outlive the creator's
+    // account. Right-to-forget covers the user's own unpublished data, not
+    // assets other wallets paid for.
+    const profiles = await userAiProfileRepository.find({ where: { userId, isImmutable: false } });
 
     // Step 2: Call AI service to delete vectors for each profile
     for (const profile of profiles) {
@@ -89,11 +95,19 @@ userAccountRouter.delete('/', isAuthenticated, async (req: Request, res: Respons
     await queryRunner.connect();
     await queryRunner.startTransaction();
     try {
-      await queryRunner.manager.delete(UserContext, { userId });
-      Logger.info(`[RIGHT-TO-FORGET] Deleted all contexts for user ${userId}`);
+      // Delete contexts per DRAFT profile, never blanket-by-userId: contexts
+      // of minted (possibly sold) buckets share this userId and must stay.
+      const draftIds = profiles.map((p) => p.id);
+      if (draftIds.length > 0) {
+        await queryRunner.manager.delete(UserContext, { profileId: In(draftIds) });
+      }
+      Logger.info(`[RIGHT-TO-FORGET] Deleted draft contexts for user ${userId}`);
 
-      await queryRunner.manager.delete(UserAiProfile, { userId });
-      Logger.info(`[RIGHT-TO-FORGET] Deleted all profiles for user ${userId}`);
+      await queryRunner.manager.delete(UserAiProfile, { userId, isImmutable: false });
+      Logger.info(`[RIGHT-TO-FORGET] Deleted draft profiles for user ${userId} (minted buckets preserved)`);
+
+      await queryRunner.manager.delete(PersonalAccessToken, { userId });
+      Logger.info(`[RIGHT-TO-FORGET] Deleted all personal access tokens for user ${userId}`);
 
       await queryRunner.manager.remove(user);
       Logger.info(`[RIGHT-TO-FORGET] Deleted user record for user ${userId}`);

@@ -146,6 +146,22 @@ async function verifyTxEvent(opts: {
   return null;
 }
 
+// Replay guard: atomically claim a txHash for a bucket. A verified on-chain
+// tx may only be mirrored once; submitting the same hash twice would
+// double-apply stock changes. Containment check and append happen in ONE
+// SQL statement, so two concurrent submissions cannot both win the claim.
+async function claimTxHash(profileId: string, txHash: string): Promise<boolean> {
+  const rows: Array<{ id: string }> = await AppDataSource.query(
+    `UPDATE user_ai_profile
+        SET "transactionHashes" = COALESCE("transactionHashes", '[]'::jsonb) || to_jsonb($2::text)
+      WHERE id = $1
+        AND NOT (COALESCE("transactionHashes", '[]'::jsonb) @> to_jsonb($2::text))
+      RETURNING id`,
+    [profileId, txHash],
+  );
+  return rows.length > 0;
+}
+
 function buildContextMetadataURI(contextId: string): string {
   return `${API_BASE_URL}/blockchain/metadata/context/${contextId}`;
 }
@@ -1128,6 +1144,11 @@ blockchainRouter.post('/list/:tokenId', isAuthenticated, async (req: Request, re
     const profile = await findProfileByTokenId(tid);
     if (!profile) return res.status(404).json({ error: 'Bucket for token not found' });
 
+    // Replay guard: the same on-chain tx may only be mirrored once.
+    if (!(await claimTxHash(profile.id, txHash as string))) {
+      return res.status(409).json({ error: 'tx_already_processed', message: 'This transaction was already recorded.' });
+    }
+
     // Derive per-unit price + amount from the verified event (never trust body).
     const client = getContractClient();
     const listed = (await client.getEventsFromTx(txHash as string, tid)).find((e) => e.event === 'Listed');
@@ -1187,6 +1208,11 @@ blockchainRouter.post('/delist/:tokenId', isAuthenticated, async (req: Request, 
     const profile = await findProfileByTokenId(tid);
     if (!profile) return res.status(404).json({ error: 'Bucket for token not found' });
 
+    // Replay guard: the same on-chain tx may only be mirrored once.
+    if (!(await claimTxHash(profile.id, txHash as string))) {
+      return res.status(409).json({ error: 'tx_already_processed', message: 'This transaction was already recorded.' });
+    }
+
     // Deactivate this seller's listing for the token.
     const seller = authAddress.toLowerCase();
     const listing = await nftListingRepository.findOne({ where: { tokenId: tid, seller } });
@@ -1240,6 +1266,11 @@ blockchainRouter.post('/buy/:tokenId', isAuthenticated, async (req: Request, res
 
     const profile = await findProfileByTokenId(tid);
     if (!profile) return res.status(404).json({ error: 'Bucket for token not found' });
+
+    // Replay guard: the same on-chain tx may only be mirrored once.
+    if (!(await claimTxHash(profile.id, txHash as string))) {
+      return res.status(409).json({ error: 'tx_already_processed', message: 'This transaction was already recorded.' });
+    }
 
     // Derive seller + amount from the verified Sold event (never trust body).
     const client = getContractClient();
