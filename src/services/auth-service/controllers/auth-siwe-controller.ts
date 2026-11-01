@@ -156,8 +156,27 @@ authSiweRouter.post('/authenticate', async function (req: Request, res: Response
       Logger.error(`Invalid nonce`);
       return res.status(400).send('Invalid nonce');
     }
+    // Bind the signature to THIS site and THIS chain: a SIWE message signed
+    // for another dapp (different domain) or another network must never
+    // authenticate here. Domain = host of the origin CORS is already locked
+    // to; chain = Oasis Sapphire testnet unless overridden.
+    let expectedDomain = 'localhost:3001';
+    try {
+      expectedDomain = new URL(process.env.MARKETPLACE_UI_ORIGIN || 'http://localhost:3001').host;
+    } catch {
+      Logger.warn('[SIWE] MARKETPLACE_UI_ORIGIN is not a valid URL; falling back to localhost:3001');
+    }
+    const expectedChainId = parseInt(process.env.SIWE_CHAIN_ID || '23295', 10);
+
     const siweMessage = new SiweMessage(message);
-    const siweResponse = await siweMessage.verify({ signature: siweToken, nonce }).catch(() => ({ success: false }));
+    if (Number(siweMessage.chainId) !== expectedChainId) {
+      memoryStoreNonce.delete(address.toLowerCase());
+      Logger.error(`[SIWE] chainId mismatch: message says ${siweMessage.chainId}, expected ${expectedChainId}`);
+      return res.status(400).send('Invalid siwe token');
+    }
+    const siweResponse = await siweMessage
+      .verify({ signature: siweToken, nonce, domain: expectedDomain })
+      .catch(() => ({ success: false }));
     // Single-use: burn the nonce whether or not verification passed.
     memoryStoreNonce.delete(address.toLowerCase());
     // check signature

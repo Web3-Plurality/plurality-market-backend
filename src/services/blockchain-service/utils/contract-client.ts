@@ -129,7 +129,11 @@ export class ContractClient {
       if (!receipt) return null;
 
       const iface = new ethers.Interface(PluralityMemoryNFTABI as any);
+      // Only OUR contract's logs count. Without this filter any contract
+      // emitting an ABI-compatible event in the same tx would be accepted.
+      const nftAddress = String(this.memoryNFT.target).toLowerCase();
       for (const log of receipt.logs) {
+        if ((log.address || '').toLowerCase() !== nftAddress) continue;
         try {
           const parsed = iface.parseLog({ topics: log.topics as string[], data: log.data });
           if (parsed && parsed.name === 'BucketMinted') {
@@ -213,6 +217,30 @@ export class ContractClient {
   }
 
   /**
+   * Read a seller's live listing for a token straight from the contract.
+   * This is the source of truth for price/stock: the DB listing row is only
+   * an index of which (token, seller) pairs to show, and its values are
+   * copied from here rather than computed from event deltas.
+   *
+   * `minBlock` is the block of the tx being mirrored. The read is pinned to a
+   * head at or after it, so an RPC node that has not caught up yet fails
+   * loudly (caller returns 500, client retries) instead of returning the
+   * pre-tx state.
+   */
+  async getListing(
+    tokenId: number,
+    seller: string,
+    minBlock: number,
+  ): Promise<{ price: string; amount: number; active: boolean }> {
+    const head = await this.provider.getBlockNumber();
+    if (head < minBlock) {
+      throw new Error(`RPC head ${head} is behind tx block ${minBlock}; retry`);
+    }
+    const l = await this.memoryNFT.listings(tokenId, seller, { blockTag: head });
+    return { price: l.price.toString(), amount: Number(l.amount), active: Boolean(l.active) };
+  }
+
+  /**
    * Get event history for a token by parsing transaction receipts.
    * Works on Oasis Sapphire which has strict log query limits.
    */
@@ -255,7 +283,11 @@ export class ContractClient {
 
       const iface = new ethers.Interface(PluralityMemoryNFTABI as any);
 
+      // Only OUR contract's logs count. Without this filter any contract
+      // emitting an ABI-compatible Listed/Sold event would pass verification.
+      const nftAddress = String(this.memoryNFT.target).toLowerCase();
       for (const log of receipt.logs) {
+        if ((log.address || '').toLowerCase() !== nftAddress) continue;
         try {
           const parsed = iface.parseLog({ topics: log.topics as string[], data: log.data });
           if (!parsed) continue;

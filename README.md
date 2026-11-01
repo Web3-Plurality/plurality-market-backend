@@ -120,6 +120,26 @@ Visibility: `skillName` and `skillSummary` are public (they appear in `GET /ai/p
 
 No contract changes were needed: the registry already accepts arbitrary source types.
 
+## Deployment trust boundary (TLS)
+
+In the hosted testnet deployment the backend, AI service and MCP server run
+inside Oasis ROFL (TEE) apps. The web UI and the reverse proxy for
+`dev.marketplace.plurality.network` run on a team-operated server outside
+the TEE.
+
+- TLS for that domain terminates at the proxy, which forwards each request
+  to the ROFL apps over a new HTTPS connection. Every network leg is
+  encrypted, but requests (including backend-to-AI-service calls) are in
+  plaintext on the proxy while it forwards them, as with any reverse proxy
+  or CDN.
+- Stored secrets (JWT signing key, PAT pepper, database credentials) live
+  only inside the enclaves.
+- API and MCP clients can call the per-machine
+  `https://p<port>.<machine>.rofl.app` endpoints directly; TLS for those
+  terminates inside the enclave.
+- Terminating TLS inside ROFL for the stable domain (the ROFL proxy
+  `custom_domain` feature) is planned before mainnet.
+
 ## License
 
 MIT (per individual file headers).
