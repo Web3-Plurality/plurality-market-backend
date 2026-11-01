@@ -72,6 +72,8 @@ const nftListingRepository = AppDataSource.getRepository(NftListing);
 // authoritative per-(token,seller) rows in nft_listing: listingActive = any
 // active listing exists; listingPrice = the current floor (min per-unit price).
 // Keeps serializeBucketAsNft (and any legacy consumer) truthful without a join.
+// Writes ONLY the two summary columns: a full save(profile) would write back
+// a stale transactionHashes array and erase hashes claimed concurrently.
 async function refreshListingSummary(profile: UserAiProfile, tokenId: number): Promise<void> {
   const active = await nftListingRepository.find({ where: { tokenId, active: true } });
   if (active.length === 0) {
@@ -84,7 +86,32 @@ async function refreshListingSummary(profile: UserAiProfile, tokenId: number): P
       .reduce((min, p) => (p < min ? p : min))
       .toString();
   }
-  await userAiProfileRepository.save(profile);
+  await userAiProfileRepository.update(profile.id, {
+    listingActive: profile.listingActive,
+    listingPrice: profile.listingPrice,
+  });
+}
+
+// Mirror one seller's listing for a token from the contract into nft_listing.
+// The chain is the source of truth for price and stock; we COPY its current
+// values instead of applying deltas from events, so resubmitting a tx, a
+// retry after a failed write, or a sale made directly on the contract all
+// converge to the correct row rather than drifting. `txBlock` is the block of
+// the tx that triggered the sync; the read never sees state older than it.
+async function syncListingFromChain(tokenId: number, profileId: string, seller: string, txBlock: number) {
+  const onChain = await getContractClient().getListing(tokenId, seller, txBlock);
+  const active = onChain.active && onChain.amount > 0;
+  let listing = await nftListingRepository.findOne({ where: { tokenId, seller } });
+  if (!listing) {
+    if (!active) return onChain;
+    listing = nftListingRepository.create({ tokenId, profileId, seller });
+  }
+  listing.profileId = profileId;
+  listing.price = onChain.price;
+  listing.amount = onChain.amount;
+  listing.active = active;
+  await nftListingRepository.save(listing);
+  return onChain;
 }
 
 // Build a self-hosted metadata URI (no IPFS/Pinata needed)
@@ -146,11 +173,12 @@ async function verifyTxEvent(opts: {
   return null;
 }
 
-// Replay guard: atomically claim a txHash for a bucket. A verified on-chain
-// tx may only be mirrored once; submitting the same hash twice would
-// double-apply stock changes. Containment check and append happen in ONE
-// SQL statement, so two concurrent submissions cannot both win the claim.
-async function claimTxHash(profileId: string, txHash: string): Promise<boolean> {
+// Append a txHash to the bucket's history index exactly once. Containment
+// check and append happen in ONE SQL statement, so concurrent submissions
+// cannot duplicate it. Stock correctness does NOT depend on this: listings
+// are copied from the chain (syncListingFromChain), so a resubmitted tx is
+// harmless and simply re-syncs. Returns false if the hash was already there.
+async function recordTxHash(profileId: string, txHash: string): Promise<boolean> {
   const rows: Array<{ id: string }> = await AppDataSource.query(
     `UPDATE user_ai_profile
         SET "transactionHashes" = COALESCE("transactionHashes", '[]'::jsonb) || to_jsonb($2::text)
@@ -1144,34 +1172,17 @@ blockchainRouter.post('/list/:tokenId', isAuthenticated, async (req: Request, re
     const profile = await findProfileByTokenId(tid);
     if (!profile) return res.status(404).json({ error: 'Bucket for token not found' });
 
-    // Replay guard: the same on-chain tx may only be mirrored once.
-    if (!(await claimTxHash(profile.id, txHash as string))) {
-      return res.status(409).json({ error: 'tx_already_processed', message: 'This transaction was already recorded.' });
-    }
-
-    // Derive per-unit price + amount from the verified event (never trust body).
-    const client = getContractClient();
-    const listed = (await client.getEventsFromTx(txHash as string, tid)).find((e) => e.event === 'Listed');
-    const price = listed?.price ?? '0';
-    const amount = listed?.amount ?? 0;
-    if (amount < 1 || !/^\d+$/.test(price) || price === '0') {
-      return res.status(400).json({ error: 'Listed event missing a valid price/amount' });
-    }
-    const seller = authAddress.toLowerCase();
-
-    // Upsert the (tokenId, seller) listing — one active row per seller per token.
-    let listing = await nftListingRepository.findOne({ where: { tokenId: tid, seller } });
-    if (!listing) {
-      listing = nftListingRepository.create({ tokenId: tid, profileId: profile.id, seller });
-    }
-    listing.profileId = profile.id;
-    listing.price = price;
-    listing.amount = amount;
-    listing.active = true;
-    await nftListingRepository.save(listing);
-
-    profile.transactionHashes = [...(profile.transactionHashes || []), txHash];
+    // Copy the seller's live listing from the contract (never trust body or
+    // event deltas). Idempotent: resubmitting the same tx just re-syncs.
+    const [txEvent] = await getContractClient().getEventsFromTx(txHash as string, tid);
+    const { price, amount } = await syncListingFromChain(
+      tid,
+      profile.id,
+      authAddress.toLowerCase(),
+      txEvent.blockNumber,
+    );
     await refreshListingSummary(profile, tid);
+    await recordTxHash(profile.id, txHash as string);
 
     return res.status(200).json({ success: true, tokenId: tid, price, amount });
   } catch (error: any) {
@@ -1208,22 +1219,11 @@ blockchainRouter.post('/delist/:tokenId', isAuthenticated, async (req: Request, 
     const profile = await findProfileByTokenId(tid);
     if (!profile) return res.status(404).json({ error: 'Bucket for token not found' });
 
-    // Replay guard: the same on-chain tx may only be mirrored once.
-    if (!(await claimTxHash(profile.id, txHash as string))) {
-      return res.status(409).json({ error: 'tx_already_processed', message: 'This transaction was already recorded.' });
-    }
-
-    // Deactivate this seller's listing for the token.
-    const seller = authAddress.toLowerCase();
-    const listing = await nftListingRepository.findOne({ where: { tokenId: tid, seller } });
-    if (listing) {
-      listing.active = false;
-      listing.amount = 0;
-      await nftListingRepository.save(listing);
-    }
-
-    profile.transactionHashes = [...(profile.transactionHashes || []), txHash];
+    // Copy the seller's listing from the contract (now inactive).
+    const [txEvent] = await getContractClient().getEventsFromTx(txHash as string, tid);
+    await syncListingFromChain(tid, profile.id, authAddress.toLowerCase(), txEvent.blockNumber);
     await refreshListingSummary(profile, tid);
+    await recordTxHash(profile.id, txHash as string);
 
     return res.status(200).json({ success: true, tokenId: tid });
   } catch (error: any) {
@@ -1267,30 +1267,17 @@ blockchainRouter.post('/buy/:tokenId', isAuthenticated, async (req: Request, res
     const profile = await findProfileByTokenId(tid);
     if (!profile) return res.status(404).json({ error: 'Bucket for token not found' });
 
-    // Replay guard: the same on-chain tx may only be mirrored once.
-    if (!(await claimTxHash(profile.id, txHash as string))) {
-      return res.status(409).json({ error: 'tx_already_processed', message: 'This transaction was already recorded.' });
-    }
-
-    // Derive seller + amount from the verified Sold event (never trust body).
+    // The verified Sold event tells us WHICH seller was bought from; the
+    // remaining stock is then copied from the contract, not computed by
+    // subtracting, so a resubmitted tx cannot reduce it twice.
     const client = getContractClient();
     const events = await client.getEventsFromTx(txHash as string, tid);
     const sold = events.find((e) => e.event === 'Sold');
     const sellerWallet = (sold?.from || '').toLowerCase();
-    const boughtAmount = sold?.amount ?? 0;
 
-    // Reduce the seller's listing by the units sold; deactivate when it hits 0.
-    if (sellerWallet && boughtAmount > 0) {
-      const listing = await nftListingRepository.findOne({ where: { tokenId: tid, seller: sellerWallet } });
-      if (listing) {
-        listing.amount = Math.max(0, listing.amount - boughtAmount);
-        if (listing.amount === 0) listing.active = false;
-        await nftListingRepository.save(listing);
-      }
-    }
-
-    profile.transactionHashes = [...(profile.transactionHashes || []), txHash];
+    if (sold && sellerWallet) await syncListingFromChain(tid, profile.id, sellerWallet, sold.blockNumber);
     await refreshListingSummary(profile, tid);
+    await recordTxHash(profile.id, txHash as string);
 
     invalidateWalletNftCache(authAddress);
     if (sellerWallet) invalidateWalletNftCache(sellerWallet);
@@ -1448,7 +1435,12 @@ blockchainRouter.put('/marketplace/featured/:profileId', isAuthenticated, async 
 
     profile.featured = featured;
     profile.featuredAt = featured ? new Date() : null;
-    await userAiProfileRepository.save(profile);
+    // Column-scoped write: a full save(profile) could write back a stale
+    // transactionHashes array and erase a hash a concurrent buy just recorded.
+    await userAiProfileRepository.update(profile.id, {
+      featured: profile.featured,
+      featuredAt: profile.featuredAt,
+    });
 
     // Audit trail: which admin wallet curated what. Ops can grep this.
     Logger.info(`[featured] admin ${authAddress} set featured=${featured} on bucket ${profileId}`);

@@ -217,6 +217,30 @@ export class ContractClient {
   }
 
   /**
+   * Read a seller's live listing for a token straight from the contract.
+   * This is the source of truth for price/stock: the DB listing row is only
+   * an index of which (token, seller) pairs to show, and its values are
+   * copied from here rather than computed from event deltas.
+   *
+   * `minBlock` is the block of the tx being mirrored. The read is pinned to a
+   * head at or after it, so an RPC node that has not caught up yet fails
+   * loudly (caller returns 500, client retries) instead of returning the
+   * pre-tx state.
+   */
+  async getListing(
+    tokenId: number,
+    seller: string,
+    minBlock: number,
+  ): Promise<{ price: string; amount: number; active: boolean }> {
+    const head = await this.provider.getBlockNumber();
+    if (head < minBlock) {
+      throw new Error(`RPC head ${head} is behind tx block ${minBlock}; retry`);
+    }
+    const l = await this.memoryNFT.listings(tokenId, seller, { blockTag: head });
+    return { price: l.price.toString(), amount: Number(l.amount), active: Boolean(l.active) };
+  }
+
+  /**
    * Get event history for a token by parsing transaction receipts.
    * Works on Oasis Sapphire which has strict log query limits.
    */
