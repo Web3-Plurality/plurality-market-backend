@@ -9,6 +9,8 @@ import { validate as isValidUUID } from 'uuid';
 import { UserAiProfile } from '../../ai-service/entity/user-ai-profile';
 import { UserContext, ContextStatus } from '../../ai-service/entity/user-context';
 import { NftListing } from '../entity/nft-listing';
+import { BucketBadge } from '../entity/bucket-badge';
+import { verifyPlatformDisclosure } from '../utils/smart-profile-badges';
 import { computeFromProfile as previewBucketHash } from '../../ai-service/utils/bucket-hash';
 import { invalidateWallet as invalidateWalletNftCache, walletToBucketHashes } from '../utils/wallet-nfts';
 import { getContractClient } from '../utils/contract-client';
@@ -67,6 +69,7 @@ export const blockchainRouter = express.Router();
 const userAiProfileRepository = AppDataSource.getRepository(UserAiProfile);
 const userContextRepository = AppDataSource.getRepository(UserContext);
 const nftListingRepository = AppDataSource.getRepository(NftListing);
+const bucketBadgeRepository = AppDataSource.getRepository(BucketBadge);
 
 // Recompute the bucket-level listing summary on user_ai_profile from the
 // authoritative per-(token,seller) rows in nft_listing: listingActive = any
@@ -101,16 +104,26 @@ async function refreshListingSummary(profile: UserAiProfile, tokenId: number): P
 async function syncListingFromChain(tokenId: number, profileId: string, seller: string, txBlock: number) {
   const onChain = await getContractClient().getListing(tokenId, seller, txBlock);
   const active = onChain.active && onChain.amount > 0;
-  let listing = await nftListingRepository.findOne({ where: { tokenId, seller } });
-  if (!listing) {
-    if (!active) return onChain;
-    listing = nftListingRepository.create({ tokenId, profileId, seller });
-  }
-  listing.profileId = profileId;
-  listing.price = onChain.price;
-  listing.amount = onChain.amount;
-  listing.active = active;
-  await nftListingRepository.save(listing);
+  // One conditional UPSERT so two concurrent syncs for the same (token, seller)
+  // can't interleave: the mirrored row only moves FORWARD in chain time. A
+  // sync whose chain read happened at an older block than the row records is
+  // a no-op instead of clobbering the newer state with stale stock. (A row is
+  // now also created for a never-listed inactive state; harmless, marketplace
+  // queries filter on active = true.)
+  await AppDataSource.query(
+    `INSERT INTO nft_listing ("tokenId", "profileId", seller, price, amount, active, "syncedAtBlock")
+     VALUES ($1, $2, $3, $4, $5, $6, $7)
+     ON CONFLICT ("tokenId", seller) DO UPDATE
+       SET "profileId"     = EXCLUDED."profileId",
+           price           = EXCLUDED.price,
+           amount          = EXCLUDED.amount,
+           active          = EXCLUDED.active,
+           "syncedAtBlock" = EXCLUDED."syncedAtBlock",
+           "updatedAt"     = now()
+     WHERE nft_listing."syncedAtBlock" IS NULL
+        OR nft_listing."syncedAtBlock" < EXCLUDED."syncedAtBlock"`,
+    [tokenId, profileId, seller, onChain.price, onChain.amount, active, onChain.atBlock],
+  );
   return onChain;
 }
 
@@ -195,6 +208,66 @@ function buildContextMetadataURI(contextId: string): string {
 }
 
 /**
+ * Verify every piece of content in the bucket (skill + all contexts) against
+ * the on-chain registry and flip the DB registeredOnChain flags for the ones
+ * that check out. confirm-mint and reconcile use it as the "bucket is
+ * actually servable" gate: buyer access resolves through these flags, so an
+ * NFT must never be stamped minted while any of them can't be verified — the
+ * buyer would hold a token that unlocks nothing. A mint done directly against
+ * the contract (bypassing confirm-registration) lands here with valid chain
+ * state but cold DB flags: verification passes and the flags heal, so the
+ * bucket serves buyers like any UI-minted one. Already-flagged rows are
+ * trusted, so the normal UI flow costs no extra RPC here.
+ */
+async function verifyAndFlagBucketContexts(
+  profile: UserAiProfile,
+): Promise<{ confirmed: string[]; pending: string[] }> {
+  const client = getContractClient();
+  const confirmed: string[] = [];
+  const pending: string[] = [];
+
+  if (profile.skillContextId) {
+    if (profile.skillRegisteredOnChain) {
+      confirmed.push(profile.skillContextId);
+    } else if (profile.skillHash && (await client.verifyContent(profile.skillContextId, profile.skillHash))) {
+      profile.skillRegisteredOnChain = true;
+      // Targeted update — a full save(profile) here could write back a stale
+      // transactionHashes array and erase hashes claimed concurrently.
+      await userAiProfileRepository.update(profile.id, { skillRegisteredOnChain: true });
+      confirmed.push(profile.skillContextId);
+    } else {
+      pending.push(profile.skillContextId);
+    }
+  }
+
+  const rows = await userContextRepository.find({ where: { profileId: profile.id } });
+  for (const ctx of rows) {
+    if (ctx.registeredOnChain) {
+      confirmed.push(ctx.contextId);
+      continue;
+    }
+    // Rows with no contentHash were SKIPPED by prepare-registration's batch
+    // builder, so they are not part of the on-chain bucketHash commitment —
+    // they must not block this gate either. Treating them as pending bricked
+    // a paid mint with no exit: the row can never verify, and it can't be
+    // deleted because the bucket is immutable.
+    if (!ctx.contentHash) continue;
+    if (await client.verifyContent(ctx.contextId, ctx.contentHash)) {
+      ctx.registeredOnChain = true;
+      // registryTxHash stays untouched: on this healing path the actual
+      // registration tx is unknown (confirm-mint only knows the MINT tx,
+      // which contains no registration events — writing it here would make
+      // every provenance link point at the wrong transaction).
+      await userContextRepository.save(ctx);
+      confirmed.push(ctx.contextId);
+    } else {
+      pending.push(ctx.contextId);
+    }
+  }
+  return { confirmed, pending };
+}
+
+/**
  * GET /blockchain/contract-info
  * Get contract addresses, chain ID, and mint fee for frontend.
  */
@@ -256,6 +329,13 @@ blockchainRouter.get('/metadata/bucket/:profileId', async (req: Request, res: Re
     if (profile.nftCategory) attributes.push({ trait_type: 'Category', value: profile.nftCategory });
     if (hasSkill && profile.skillName) attributes.push({ trait_type: 'Skill', value: profile.skillName });
 
+    // Creator's verified-platform badges (smart-profile disclosure, verified
+    // against the on-chain attestation at write time — see PUT /badges).
+    const badges = await bucketBadgeRepository.find({ where: { profileId }, order: { platformType: 'ASC' } });
+    for (const b of badges) {
+      attributes.push({ trait_type: 'Verified platform', value: b.platformType });
+    }
+
     // Skill provenance is public (hash + on-chain id). Instructions are not.
     const properties: Record<string, unknown> = {
       bucketHash: profile.bucketHash,
@@ -264,6 +344,14 @@ blockchainRouter.get('/metadata/bucket/:profileId', async (req: Request, res: Re
     if (hasSkill) {
       properties.skillHash = profile.skillHash;
       properties.skillContextId = profile.skillContextId;
+    }
+    if (badges.length > 0) {
+      properties.verifiedPlatforms = badges.map((b) => ({
+        platform: b.platformType,
+        username: b.username,
+        wallet: b.wallet,
+        attestationUID: b.privateAttestationUID,
+      }));
     }
 
     return res.status(200).json({
@@ -739,11 +827,31 @@ blockchainRouter.post('/mint/:profileId/prepare-mint', isAuthenticated, async (r
       });
     }
 
+    // On-chain reality check: the bucket may ALREADY be minted even though the
+    // DB says otherwise — a previous mint tx landed but the confirmation call
+    // was interrupted before it reached us. Handing out calldata again would
+    // make the user sign a second tx the contract is guaranteed to reject.
+    // Point the client at /reconcile instead.
+    const onChainTokenId = await client.getTokenIdByBucketHash(profile.bucketHash);
+    if (onChainTokenId !== null) {
+      return res.status(409).json({
+        error: 'already_minted_on_chain',
+        tokenId: onChainTokenId,
+        message: 'This bucket is already minted on-chain. Call /mint/:profileId/reconcile to adopt it.',
+      });
+    }
+
     // Edition size (number of copies) the creator wants to mint, 1..MAX_COPIES.
-    // Defaults to 1 for backward-compatible callers.
-    const copies = Number((req.body as { copies?: number })?.copies ?? 1);
+    // Persisted so a resume after an interrupted mint re-uses the ORIGINAL
+    // choice: resume calls prepare-mint without a body, which previously fell
+    // back to 1 copy no matter what the creator picked the first time.
+    const rawCopies = (req.body as { copies?: number })?.copies;
+    const copies = Number(rawCopies ?? profile.requestedCopies ?? 1);
     if (!Number.isInteger(copies) || copies < 1 || copies > 10) {
       return res.status(400).json({ error: 'copies must be an integer in [1, 10]' });
+    }
+    if (profile.requestedCopies !== copies) {
+      await userAiProfileRepository.update(profile.id, { requestedCopies: copies });
     }
 
     const metadataURI = buildBucketMetadataURI(profileId);
@@ -815,6 +923,20 @@ blockchainRouter.post('/mint/:profileId/confirm-mint', isAuthenticated, async (r
       return res.status(403).json({ error: 'On-chain bucketHash does not match the prepared mint' });
     }
 
+    // Gate on the bucket actually being servable (see the helper's doc):
+    // without this, a mint done directly against the contract on a bucket
+    // that never went through confirm-registration gets stamped minted here,
+    // and buyers hold an NFT whose memory they can't read.
+    const { pending } = await verifyAndFlagBucketContexts(profile);
+    if (pending.length > 0) {
+      return res.status(409).json({
+        error: 'bucket_contexts_not_registered',
+        pending,
+        message:
+          'Some bucket contents could not be verified on-chain, so the mint cannot be confirmed. Complete registration (confirm-registration) first.',
+      });
+    }
+
     profile.mintedTokenId = tokenId;
     profile.mintedAt = new Date();
     profile.mintTxHash = txHash;
@@ -830,6 +952,81 @@ blockchainRouter.post('/mint/:profileId/confirm-mint', isAuthenticated, async (r
   } catch (error: any) {
     Logger.error('Failed to confirm mint:', error);
     return res.status(500).json({ error: 'Failed to confirm mint' });
+  }
+});
+
+/**
+ * POST /blockchain/mint/:profileId/reconcile
+ * Recovery path for an interrupted mint: the mintBucket tx landed on-chain but
+ * confirm-mint never arrived (tab closed, network drop), so the DB still says
+ * "registered". The original txHash is gone, so this verifies the CURRENT
+ * chain state instead: the NFT contract must map our bucketHash to a live
+ * tokenId, and the registry must name the caller as the bucket's registrant —
+ * mintBucket enforces msg.sender == registrant, so that token can only be the
+ * caller's own mint. Then it stamps the same fields confirm-mint would have.
+ */
+blockchainRouter.post('/mint/:profileId/reconcile', isAuthenticated, async (req: Request, res: Response) => {
+  try {
+    const authAddress = req?.user?.authAddress;
+    const { profileId } = req.params;
+
+    const loaded = await loadOwnedProfile(req, profileId);
+    if (!loaded.ok) return res.status(loaded.status).json(loaded.body);
+    const { profile } = loaded;
+
+    if (profile.mintedTokenId) {
+      // Already consistent — idempotent success.
+      return res.status(200).json({ status: 'minted', tokenId: profile.mintedTokenId });
+    }
+    if (!profile.bucketHash) {
+      return res.status(409).json({ error: 'not_registered' });
+    }
+
+    const client = getContractClient();
+    if (!client.isConfigured()) {
+      return res.status(503).json({ error: 'Blockchain service not configured' });
+    }
+
+    const tokenId = await client.getTokenIdByBucketHash(profile.bucketHash);
+    if (tokenId === null) {
+      return res.status(409).json({
+        error: 'not_minted_on_chain',
+        message: 'No NFT exists for this bucket on-chain. Resume the mint via /prepare-mint.',
+      });
+    }
+
+    const registrant = await client.getBucketRegistrant(profile.bucketHash);
+    if (!authAddress || registrant !== authAddress.toLowerCase()) {
+      return res.status(403).json({ error: 'bucket_claimed_by_another_wallet', registrant });
+    }
+
+    // Same servability gate as confirm-mint.
+    const { pending } = await verifyAndFlagBucketContexts(profile);
+    if (pending.length > 0) {
+      return res.status(409).json({
+        error: 'bucket_contexts_not_registered',
+        pending,
+        message: 'Some bucket contents could not be verified on-chain; cannot adopt this mint.',
+      });
+    }
+
+    profile.mintedTokenId = tokenId;
+    profile.mintedAt = new Date();
+    // The original txHash is unknown on this path, so the BucketMinted event
+    // (which carries `copies`) is out of reach — Sapphire's log-range limits
+    // rule out scanning for it. Edition size: the creator's persisted choice,
+    // else the wallet's current balance (exact unless copies were already
+    // moved by direct contract calls, which later syncs correct).
+    profile.editionSize =
+      profile.requestedCopies ?? (await client.getBalance(authAddress, tokenId).catch(() => 1));
+    await userAiProfileRepository.save(profile);
+
+    invalidateWalletNftCache(authAddress);
+
+    return res.status(200).json({ status: 'minted', tokenId, bucketHash: profile.bucketHash, reconciled: true });
+  } catch (error: any) {
+    Logger.error('Failed to reconcile mint:', error);
+    return res.status(500).json({ error: 'Failed to reconcile mint' });
   }
 });
 
@@ -1549,5 +1746,100 @@ blockchainRouter.get('/verify/:contextId', async (req: Request, res: Response) =
   } catch (error: any) {
     Logger.error('Failed to verify content:', error);
     return res.status(500).json({ error: 'Failed to verify content' });
+  }
+});
+
+/**
+ * PUT /blockchain/badges/:profileId
+ * Attach verified-platform badges to the caller's own bucket. Body:
+ * { privateAttestationUID, proof } as returned by sp-api's
+ * /smart-profiles/disclosure. The disclosure is verified against the
+ * ON-CHAIN attestation (recipient must be the caller's wallet) before
+ * anything is stored; the stored set is replaced wholesale, so re-submitting
+ * with fewer platforms removes the others.
+ */
+blockchainRouter.put('/badges/:profileId', isAuthenticated, async (req: Request, res: Response) => {
+  try {
+    const { profileId } = req.params;
+    const loaded = await loadOwnedProfile(req, profileId);
+    if (!loaded.ok) return res.status(loaded.status).json(loaded.body);
+
+    const wallet = (req.user?.authAddress || '').toLowerCase();
+    if (!wallet) return res.status(401).json({ error: 'No wallet on session' });
+
+    const { privateAttestationUID, proof } = req.body || {};
+    if (typeof privateAttestationUID !== 'string' || !proof) {
+      return res.status(400).json({ error: 'privateAttestationUID and proof are required' });
+    }
+
+    const result = await verifyPlatformDisclosure(wallet, privateAttestationUID, proof);
+    if (!result.ok || !result.badges) {
+      return res.status(422).json({ error: 'badge_verification_failed', message: result.error });
+    }
+
+    await AppDataSource.transaction(async (manager) => {
+      await manager.delete(BucketBadge, { profileId });
+      for (const b of result.badges!) {
+        await manager.insert(BucketBadge, {
+          profileId,
+          wallet,
+          platformType: b.platformType,
+          username: b.username,
+          userPlatformId: b.userPlatformId,
+          privateAttestationUID,
+          proof: proof as object,
+        });
+      }
+    });
+
+    Logger.info(`[badges] ${wallet} attached ${result.badges.length} badge(s) to bucket ${profileId}`);
+    return res.status(200).json({
+      badges: result.badges.map((b) => ({ ...b, privateAttestationUID })),
+    });
+  } catch (error: any) {
+    Logger.error('Failed to set bucket badges:', error);
+    return res.status(500).json({ error: 'Failed to set badges' });
+  }
+});
+
+/**
+ * DELETE /blockchain/badges/:profileId — remove all badges from own bucket.
+ */
+blockchainRouter.delete('/badges/:profileId', isAuthenticated, async (req: Request, res: Response) => {
+  try {
+    const { profileId } = req.params;
+    const loaded = await loadOwnedProfile(req, profileId);
+    if (!loaded.ok) return res.status(loaded.status).json(loaded.body);
+    await bucketBadgeRepository.delete({ profileId });
+    return res.status(200).json({ badges: [] });
+  } catch (error: any) {
+    Logger.error('Failed to delete bucket badges:', error);
+    return res.status(500).json({ error: 'Failed to delete badges' });
+  }
+});
+
+/**
+ * GET /blockchain/badges/:profileId — public. Returns the bucket's verified
+ * badges INCLUDING the attestation UID and Merkle proof, so any consumer can
+ * re-verify against the chain instead of trusting this API.
+ */
+blockchainRouter.get('/badges/:profileId', async (req: Request, res: Response) => {
+  try {
+    const { profileId } = req.params;
+    if (!isValidUUID(profileId)) return res.status(400).json({ error: 'Invalid profile id' });
+    const rows = await bucketBadgeRepository.find({ where: { profileId }, order: { platformType: 'ASC' } });
+    return res.status(200).json({
+      badges: rows.map((r) => ({
+        platformType: r.platformType,
+        username: r.username,
+        userPlatformId: r.userPlatformId,
+        wallet: r.wallet,
+        privateAttestationUID: r.privateAttestationUID,
+        proof: r.proof,
+      })),
+    });
+  } catch (error: any) {
+    Logger.error('Failed to get bucket badges:', error);
+    return res.status(500).json({ error: 'Failed to get badges' });
   }
 });

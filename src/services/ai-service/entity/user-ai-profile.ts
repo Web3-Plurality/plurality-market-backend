@@ -41,6 +41,13 @@ export class UserAiProfile {
   @Column({ type: 'int', nullable: true })
   editionSize: number | null;
 
+  // Edition size the creator ASKED for, persisted at /mint/prepare-mint so an
+  // interrupted mint can be resumed with the same choice. Without this, resume
+  // (which calls prepare-mint without a body) silently fell back to 1 copy.
+  // editionSize above stays the authoritative post-mint value from the event.
+  @Column({ type: 'int', nullable: true })
+  requestedCopies: number | null;
+
   @Column({ type: 'timestamp', nullable: true })
   mintedAt: Date | null;
 

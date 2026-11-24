@@ -217,6 +217,23 @@ export class ContractClient {
   }
 
   /**
+   * tokenId already minted for a bucketHash, or null if none. The contract
+   * maps bucketHash → tokenId with 0 meaning "not minted" (real tokenIds
+   * start at 1). This is how an interrupted mint (tx landed, confirmation
+   * lost) is detected without knowing the original txHash.
+   */
+  async getTokenIdByBucketHash(bucketHash: string): Promise<number | null> {
+    const id: bigint = await this.memoryNFT.bucketHashToTokenId(bucketHash);
+    return id > 0n ? Number(id) : null;
+  }
+
+  /** ERC-1155 balance of `address` for `tokenId`. */
+  async getBalance(address: string, tokenId: number): Promise<number> {
+    const bal: bigint = await this.memoryNFT.balanceOf(address, tokenId);
+    return Number(bal);
+  }
+
+  /**
    * Read a seller's live listing for a token straight from the contract.
    * This is the source of truth for price/stock: the DB listing row is only
    * an index of which (token, seller) pairs to show, and its values are
@@ -231,13 +248,15 @@ export class ContractClient {
     tokenId: number,
     seller: string,
     minBlock: number,
-  ): Promise<{ price: string; amount: number; active: boolean }> {
+  ): Promise<{ price: string; amount: number; active: boolean; atBlock: number }> {
     const head = await this.provider.getBlockNumber();
     if (head < minBlock) {
       throw new Error(`RPC head ${head} is behind tx block ${minBlock}; retry`);
     }
     const l = await this.memoryNFT.listings(tokenId, seller, { blockTag: head });
-    return { price: l.price.toString(), amount: Number(l.amount), active: Boolean(l.active) };
+    // atBlock is the block the returned state was read at — callers use it to
+    // refuse overwriting a DB mirror that was synced from a LATER block.
+    return { price: l.price.toString(), amount: Number(l.amount), active: Boolean(l.active), atBlock: head };
   }
 
   /**
