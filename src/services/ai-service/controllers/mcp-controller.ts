@@ -2,11 +2,21 @@ import express, { Request, Response } from 'express';
 import axios from 'axios';
 import Logger from '../../../lib/logger';
 import { isAuthenticatedMcp } from '../../user-service/middlewares/auth-middleware';
+import { consumeSearchQuota } from '../utils/llm-quota';
 import { resolveProfileAccess } from '../utils/permission';
+import { AppDataSource } from '../../../data-source';
+import { UserAiProfile } from '../entity/user-ai-profile';
+import { walletToBucketHashes } from '../../blockchain-service/utils/wallet-nfts';
 
 export const mcpRouter = express.Router();
 
 const AI_SERVICE_URL = process.env.AI_SERVICE_URL || 'http://localhost:8001';
+const userAiProfileRepository = AppDataSource.getRepository(UserAiProfile);
+
+// Upper bound on the per-request fan-out to the AI service when searching
+// "all buckets" — keeps one MCP call from turning into hundreds of vector
+// queries for pathological accounts.
+const MAX_SEARCH_BUCKETS = 50;
 
 // POST /mcp/semantic-search — proxy semantic similarity search to AI service.
 // Per-profile path resolves access first, then forwards the original creator's
@@ -26,6 +36,14 @@ mcpRouter.post('/semantic-search', isAuthenticatedMcp('mcp:tools'), async (req: 
 
     if (!query || typeof query !== 'string') {
       return res.status(400).json({ error: 'query is required and must be a string' });
+    }
+
+    // Search quota: embeddings aren't free and the no-profileIds branch fans
+    // out one vector query per bucket. One guard here covers every access
+    // path (extension direct + MCP server proxy).
+    const quota = await consumeSearchQuota(req);
+    if (!quota.ok) {
+      return res.status(429).json({ error: 'search_quota_exceeded', message: quota.message });
     }
     if (profileIds !== undefined && !Array.isArray(profileIds)) {
       return res.status(400).json({ error: 'profileIds must be an array of strings' });
@@ -66,16 +84,50 @@ mcpRouter.post('/semantic-search', isAuthenticatedMcp('mcp:tools'), async (req: 
         );
       }
     } else {
-      // No profileIds → search all the caller's owned content in one call.
-      searchPromises.push(
-        axios
-          .post(`${AI_SERVICE_URL}/rag/similarity-search`, { userId, query, k }, { headers: aiHeaders })
-          .then((response) => response.data.results || [])
-          .catch((err) => {
-            Logger.error(`[MCP] Semantic search failed for owned content: ${err.message}`);
-            return [];
-          }),
-      );
+      // No profileIds → search EVERY bucket the caller can access: buckets
+      // they created plus buckets whose NFT their wallet currently holds.
+      // Vectors are written under (creator userId, profileId), so a single
+      // userId-filtered query — what this branch used to send — matched
+      // nothing: not the caller's own buckets (wrong namespace shape) and
+      // certainly not purchased ones (creator's userId, not the caller's).
+      const own = await userAiProfileRepository.find({ select: ['id', 'userId'], where: { userId } });
+      let held: UserAiProfile[] = [];
+      try {
+        const heldHashes = await walletToBucketHashes(authAddress);
+        if (heldHashes.size > 0) {
+          held = await userAiProfileRepository
+            .createQueryBuilder('p')
+            .select(['p.id', 'p.userId'])
+            .where('LOWER(p."bucketHash") IN (:...hashes)', { hashes: [...heldHashes] })
+            .getMany();
+        }
+      } catch (err) {
+        Logger.warn(`[MCP] held-NFT lookup failed; searching owned buckets only: ${(err as Error).message}`);
+      }
+
+      const seen = new Set<string>();
+      const targets: UserAiProfile[] = [];
+      for (const p of [...own, ...held]) {
+        if (seen.has(p.id)) continue;
+        seen.add(p.id);
+        targets.push(p);
+      }
+
+      for (const p of targets.slice(0, MAX_SEARCH_BUCKETS)) {
+        searchPromises.push(
+          axios
+            .post(
+              `${AI_SERVICE_URL}/rag/similarity-search`,
+              { userId: p.userId, profileId: p.id, query, k },
+              { headers: aiHeaders },
+            )
+            .then((response) => response.data.results || [])
+            .catch((err) => {
+              Logger.error(`[MCP] Semantic search failed for profile ${p.id}: ${err.message}`);
+              return [];
+            }),
+        );
+      }
     }
 
     const resultsBySource = await Promise.all(searchPromises);

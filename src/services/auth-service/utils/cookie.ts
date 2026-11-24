@@ -1,6 +1,10 @@
 import { Response } from 'express';
 
-const COOKIE_NAME = 'auth_token';
+// Distinct from memory-studio's 'auth_token': on localhost dev both apps
+// share the cookie jar (ports don't isolate cookies), so an identical name
+// meant logging into one product silently logged you out of the other —
+// the marketplace then 403'd every call with the studio-signed JWT.
+const COOKIE_NAME = 'market_auth_token';
 const isProduction = process.env.NODE_ENV === 'production';
 
 // Cookie options for HttpOnly JWT

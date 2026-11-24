@@ -22,13 +22,16 @@ export interface AuthUser {
 
 // ── Token extraction helper ────────────────────────────────────────────
 function extractToken(req: Request): string | undefined {
-  // Try HttpOnly cookie first (web app)
-  let token = req.cookies?.[COOKIE_NAME];
-  // Fall back to Authorization header (MCP clients sending PATs)
-  if (!token) {
-    token = req?.headers?.authorization && req?.headers?.authorization.split(' ')[1];
+  const bearer = req?.headers?.authorization && req?.headers?.authorization.split(' ')[1];
+  // A PAT in the Authorization header ALWAYS wins. Browser-based PAT clients
+  // (the AICF extension's background fetches) carry the user's cookies for
+  // this host alongside the header; letting the web-login cookie shadow the
+  // PAT made every such call 403 with "this endpoint requires a PAT".
+  if (bearer && isPatToken(bearer)) {
+    return bearer;
   }
-  return token;
+  // HttpOnly cookie (web app), then plain Bearer JWT.
+  return req.cookies?.[COOKIE_NAME] || bearer;
 }
 
 // ── Verify a Personal Access Token (PAT) against the DB ────────────────

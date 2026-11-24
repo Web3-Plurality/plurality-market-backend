@@ -44,6 +44,13 @@ export class NftListing {
   @Column({ type: 'boolean', default: true })
   active: boolean;
 
+  // Block height the mirrored price/amount/active were read from the chain at.
+  // Guard against the sync race: two concurrent syncs for the same row must
+  // never let the OLDER chain read overwrite the newer one, so every write is
+  // conditional on syncedAtBlock increasing (see syncListingFromChain).
+  @Column({ type: 'int', nullable: true })
+  syncedAtBlock: number | null;
+
   @CreateDateColumn()
   createdAt: Date;
 

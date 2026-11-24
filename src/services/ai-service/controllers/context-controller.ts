@@ -208,6 +208,8 @@ contextRouter.post('/add-raw-context', isAuthenticatedNativeOrMcp('mcp:tools'), 
         profileId: profile?.id,
         context,
         contextId,
+        // Forward the user's title so the AI service skips its LLM pass.
+        title: customTitle || undefined,
       },
       {
         headers: {
@@ -251,6 +253,190 @@ contextRouter.post('/add-raw-context', isAuthenticatedNativeOrMcp('mcp:tools'), 
   } catch (error) {
     Logger.error('Error in RAG controller:', error);
     res.status(500).send('Internal Server Error');
+  }
+});
+
+// ── AICF bundle import ─────────────────────────────────────────────────────
+// Accepts the JSON bundle exported by Memory Studio ("Export for
+// Marketplace") and replays its items through the same async pipeline as
+// /upload-file: one user_context row per item, content forwarded to the AI
+// service as a .txt file, embedding + final status via the existing
+// background queue + webhook — so the UI's normal context polling shows
+// per-item progress with no new machinery. Items carry their own titles, so
+// the LLM title pass is skipped: an import burns zero Gemini quota.
+const IMPORT_BUNDLE_FORMAT = 'aicf-bucket-export';
+const IMPORT_MAX_ITEMS = 100;
+const IMPORT_MAX_ITEM_BYTES = 5 * 1024 * 1024;
+// Matches the studio exporter's total cap, and keeps every legal bundle far
+// below the 50mb JSON body-parser limit (index.ts) — otherwise a bundle
+// could die at the parser with a non-JSON 413 instead of our error contract.
+const IMPORT_MAX_TOTAL_BYTES = 20 * 1024 * 1024;
+
+contextRouter.post('/import-bundle', isAuthenticated, async (req: Request, res: Response) => {
+  try {
+    const userId = req?.user?.id;
+    const authAddress = req?.user?.authAddress;
+    const { profileId, bundle } = req.body as { profileId?: string; bundle?: any };
+
+    if (!profileId || !isValidUUID(profileId)) {
+      return res.status(400).json({ error: 'profileId (UUID) is required' });
+    }
+    // The bundle is UNTRUSTED input — anyone can handcraft one. Validate
+    // shape and sizes strictly, never fetch any URL it may contain, and
+    // treat its origin claims as self-attested (no provenance badge).
+    if (!bundle || bundle.format !== IMPORT_BUNDLE_FORMAT || bundle.version !== 1) {
+      return res.status(400).json({
+        error: 'unrecognized_bundle',
+        message: 'Not an AI Context Flow export bundle (format/version mismatch).',
+      });
+    }
+    const items = bundle.contexts;
+    if (!Array.isArray(items) || items.length === 0) {
+      return res.status(400).json({ error: 'empty_bundle', message: 'The bundle contains no contexts.' });
+    }
+    if (items.length > IMPORT_MAX_ITEMS) {
+      return res.status(400).json({
+        error: 'too_many_items',
+        message: `A bundle may contain at most ${IMPORT_MAX_ITEMS} contexts. Split the export.`,
+      });
+    }
+
+    // Permission check: must have editor+ access, bucket must not be minted.
+    const access = await resolveProfileAccess(authAddress as string, userId as string, profileId);
+    if (!access.hasAccess || !hasMinRole(access, 'editor')) {
+      return res.status(404).json({ error: 'Profile not found or insufficient permissions' });
+    }
+    if (access.isImmutable) {
+      return res.status(403).json({
+        error: 'bucket_immutable',
+        message: 'This bucket has been minted and is read-only. Import into a different bucket.',
+      });
+    }
+    const effectiveOwnerId = access.ownerId || userId;
+    const profile = await userAiProfileRepository.findOne({ where: { id: profileId } });
+    if (!profile) {
+      return res.status(404).json({ error: 'Profile not found' });
+    }
+
+    type ImportItemResult = { index: number; contextId?: string; title?: string; status: string; error?: string };
+    const results: ImportItemResult[] = [];
+
+    // Sequential on purpose: each forward returns quickly (embedding runs in
+    // the AI service's background queue), and a serial loop keeps one import
+    // from monopolizing the service's request workers.
+    let importedBytes = 0;
+    for (let i = 0; i < items.length; i++) {
+      const item = items[i] ?? {};
+      const content = typeof item.content === 'string' ? item.content : '';
+      const title = (
+        typeof item.title === 'string' && item.title.trim() ? item.title.trim() : `Imported item ${i + 1}`
+      ).slice(0, 200);
+      if (!content.trim()) {
+        results.push({ index: i, title, status: 'skipped', error: 'empty content' });
+        continue;
+      }
+      const contentBytes = Buffer.byteLength(content, 'utf8');
+      if (contentBytes > IMPORT_MAX_ITEM_BYTES) {
+        results.push({
+          index: i,
+          title,
+          status: 'skipped',
+          error: `content exceeds ${IMPORT_MAX_ITEM_BYTES / (1024 * 1024)}MB`,
+        });
+        continue;
+      }
+      if (importedBytes + contentBytes > IMPORT_MAX_TOTAL_BYTES) {
+        results.push({
+          index: i,
+          title,
+          status: 'skipped',
+          error: `bundle content exceeds ${IMPORT_MAX_TOTAL_BYTES / (1024 * 1024)}MB total`,
+        });
+        continue;
+      }
+
+      // Re-check the freeze flag EVERY item: this loop spans many seconds,
+      // and a concurrent prepare-registration can freeze the bucket and pin
+      // its bucketHash mid-import. Rows added after that moment would sit
+      // OUTSIDE the on-chain commitment — permanently divergent content and
+      // a mint that can never pass the confirm gate.
+      const freshProfile = await userAiProfileRepository.findOne({
+        where: { id: profileId },
+        select: ['id', 'isImmutable'],
+      });
+      if (!freshProfile || freshProfile.isImmutable) {
+        results.push({
+          index: i,
+          title,
+          status: 'skipped',
+          error: 'bucket was frozen for minting during the import',
+        });
+        continue;
+      }
+      importedBytes += contentBytes;
+
+      const sourceType = ['text', 'chat', 'file'].includes(item.sourceType) ? item.sourceType : 'text';
+      const contextId = uuidv4();
+      const userContext = userContextRepository.create({
+        userId: effectiveOwnerId, // store under owner's namespace
+        contextId,
+        title,
+        description: typeof item.description === 'string' ? item.description.slice(0, 2000) : '',
+        profileId,
+        status: ContextStatus.IN_PROGRESS,
+        // Metadata for source identification — sourcePlatform keeps the
+        // platform the memory was originally captured from (self-attested).
+        sourceType,
+        sourcePlatform: typeof item.sourcePlatform === 'string' ? item.sourcePlatform.slice(0, 60) : 'aicf-import',
+        contentSize: contentBytes,
+        contentHash: hashContent(content), // SHA-256 for on-chain provenance
+      });
+      await userContextRepository.save(userContext);
+
+      try {
+        const formData = new FormData();
+        formData.append('file', Buffer.from(content, 'utf8'), {
+          filename: `${title.replace(/[\\/:*?"<>|]/g, '_').slice(0, 80) || 'imported'}.txt`,
+          contentType: 'text/plain',
+        });
+        formData.append('userId', effectiveOwnerId);
+        formData.append('profileId', profileId);
+        formData.append('contextId', contextId);
+        // Skips the AI service's LLM title pass — the item is pre-titled.
+        formData.append('title', title);
+
+        const response = await axios.post(`${process.env.AI_SERVICE_URL}/rag/upload-file`, formData, {
+          headers: {
+            ...formData.getHeaders(),
+            'X-API-Key': process.env.AI_SERVICE_API_KEY as string,
+          },
+          maxContentLength: Infinity,
+          maxBodyLength: Infinity,
+        });
+        if (response.status !== 200) {
+          throw new Error(`AI service returned ${response.status}`);
+        }
+        results.push({ index: i, contextId, title, status: 'processing' });
+      } catch (err) {
+        userContext.status = ContextStatus.ERROR;
+        userContext.errorMessage = 'Failed to hand the imported item to the AI service';
+        await userContextRepository.save(userContext);
+        results.push({ index: i, contextId, title, status: 'error', error: (err as Error).message });
+      }
+    }
+
+    refreshBucketHash(profileId);
+
+    const accepted = results.filter((r) => r.status === 'processing').length;
+    return res.status(200).json({
+      profileId,
+      total: items.length,
+      accepted,
+      items: results,
+    });
+  } catch (error) {
+    Logger.error('Error importing bundle:', error);
+    return res.status(500).json({ error: 'Failed to import bundle' });
   }
 });
 
@@ -391,6 +577,9 @@ contextRouter.post(
           profileId: profile?.id,
           chatHistory,
           contextId,
+          // The AI service runs no LLM pass; it titles the transcript with
+          // this, or with the first user message when absent.
+          title: customTitle || undefined,
         },
         {
           headers: {
